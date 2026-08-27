@@ -1,0 +1,98 @@
+rules_version = '2';
+service firebase.storage {
+  // ============================================================
+  // PAROLE - Règles Storage (Phase 1)
+  // Bucket privé : AUCUN accès public. Toute lecture nécessite
+  // l'authentification. Chemins contrôlés : un utilisateur ne peut
+  // écrire que sous /media/{son uid}/... Type et taille contrôlés.
+  // La visibilité des médias de posts suit celle du post Firestore.
+  // ============================================================
+
+  match /b/{bucket}/o {
+
+    // ----------------------------------------------------------
+    // Helpers
+    // ----------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function isVideo() {
+      return request.resource.contentType.matches('video/.*');
+    }
+
+    function isAudio() {
+      return request.resource.contentType.matches('audio/.*');
+    }
+
+    // Avatar : image uniquement, 5 Mo max.
+    function validAvatarUpload(uid) {
+      return isOwner(uid)
+        && request.resource.size > 0
+        && request.resource.size <= 5 * 1024 * 1024
+        && isImage();
+    }
+
+    // Média de post : image (5 Mo), vidéo (100 Mo) ou audio (20 Mo).
+    // Le post cible doit exister et appartenir à l'auteur.
+    function validPostMediaUpload(uid, postId) {
+      return isOwner(uid)
+        && request.resource.size > 0
+        && request.resource.size <= 100 * 1024 * 1024
+        && firestore.exists(/databases/(default)/documents/posts/$(postId))
+        && firestore.get(/databases/(default)/documents/posts/$(postId)).data.authorId == uid
+        && (isImage() && request.resource.size <= 5 * 1024 * 1024
+            || isVideo() && request.resource.size <= 100 * 1024 * 1024
+            || isAudio() && request.resource.size <= 20 * 1024 * 1024);
+    }
+
+    // Un média de post n'est lisible que si le post lui-même est
+    // lisible (visibilité publique + non masqué + non supprimé).
+    // L'auteur peut toujours lire ses propres médias.
+    function canReadPostMedia(uid, postId) {
+      return isOwner(uid)
+        || (isSignedIn()
+            && firestore.exists(/databases/(default)/documents/posts/$(postId))
+            && !('deletedAt' in firestore.get(/databases/(default)/documents/posts/$(postId)).data)
+            && firestore.get(/databases/(default)/documents/posts/$(postId)).data.moderationStatus == 'visible'
+            && firestore.get(/databases/(default)/documents/posts/$(postId)).data.visibility == 'public');
+    }
+
+    // ----------------------------------------------------------
+    // Avatars : lisibles par tout utilisateur connecté ; écrits
+    // uniquement par leur propriétaire (image <= 5 Mo).
+    // ----------------------------------------------------------
+    match /media/{uid}/avatars/{fileName} {
+      allow read: if isSignedIn();
+      allow create, update: if validAvatarUpload(uid);
+      allow delete: if isOwner(uid);
+    }
+
+    // ----------------------------------------------------------
+    // Médias de posts : lecture conditionnée à la visibilité du post
+    // Firestore ; écriture réservée au propriétaire (types et tailles
+    // contrôlés).
+    // ----------------------------------------------------------
+    match /media/{uid}/posts/{postId}/{fileName} {
+      allow read: if canReadPostMedia(uid, postId);
+      allow create: if validPostMediaUpload(uid, postId);
+      allow update: if isOwner(uid);
+      allow delete: if isOwner(uid);
+    }
+
+    // ----------------------------------------------------------
+    // Toute autre ressource : DENY BY DEFAULT (aucun accès public).
+    // ----------------------------------------------------------
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

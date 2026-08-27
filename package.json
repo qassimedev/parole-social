@@ -1,0 +1,29 @@
+{
+  "name": "parole-social",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PAROLE - Ta voix. Ton espace. Tes droits. Plateforme sociale centree sur la liberte d'expression responsable.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit",
+    "build:functions": "npm run build --prefix functions",
+    "emulators": "firebase emulators:start",
+    "emulators:export": "firebase emulators:export ./emulator-data",
+    "test:rules": "firebase emulators:exec --only firestore,storage \"node scripts/test-rules.mjs\"",
+    "test:functions": "npm run build:functions && firebase emulators:exec --only auth,firestore,functions \"node scripts/test-functions.mjs\"",
+    "test:all": "npm run test:rules && npm run test:functions"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^4.0.1",
+    "firebase-admin": "^14.3.0",
+    "firebase-tools": "^15.28.1",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.0"
+  },
+  "dependencies": {
+    "firebase": "^11.0.0"
+  }
+}

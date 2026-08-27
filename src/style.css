@@ -1,0 +1,101 @@
+:root {
+  --color-bg: #1a1a2e;
+  --color-surface: #16213e;
+  --color-accent: #e94560;
+  --color-text: #eaeaea;
+  --color-muted: #9aa0b4;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  min-height: 100dvh;
+  background: var(--color-bg);
+  color: var(--color-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.shell {
+  text-align: center;
+  padding: 2rem;
+  max-width: 34rem;
+  width: 100%;
+}
+
+.brand__logo {
+  width: 4.5rem;
+  height: 4.5rem;
+  margin: 0 auto 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2.5rem;
+  font-weight: 800;
+  color: #fff;
+  background: linear-gradient(135deg, var(--color-accent), #533483);
+  border-radius: 1rem;
+  box-shadow: 0 0.5rem 1.5rem rgba(233, 69, 96, 0.35);
+}
+
+.brand__name {
+  font-size: 2.25rem;
+  letter-spacing: 0.35em;
+  text-transform: uppercase;
+}
+
+.brand__slogan {
+  margin-top: 0.5rem;
+  color: var(--color-muted);
+  font-size: 1rem;
+}
+
+.status {
+  margin-top: 2rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 1rem;
+  border-radius: 999px;
+  background: var(--color-surface);
+}
+
+.status__dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: #ffc857;
+}
+
+.shell--ready .status__dot {
+  background: #4ade80;
+}
+
+.status__text {
+  font-size: 0.875rem;
+  color: var(--color-muted);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .shell--ready .brand__logo {
+    animation: pop 0.4s ease-out;
+  }
+}
+
+@keyframes pop {
+  from {
+    transform: scale(0.9);
+    opacity: 0.5;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}

@@ -1,0 +1,320 @@
+rules_version = '2';
+service cloud.firestore {
+  // ============================================================
+  // PAROLE - Règles Firestore (Phase 1 : Architecture & Sécurité)
+  // PRINCIPE ABSOLU : DENY BY DEFAULT.
+  //   - Aucune lecture/écriture sans règle explicite.
+  //   - Un utilisateur ne peut modifier que ses propres données.
+  //   - Les champs sensibles (role, banned, counters, modération,
+  //     auditLogs) ne sont JAMAIS modifiables par un client.
+  //   - Toutes les mutations sensibles passent par les Cloud
+  //     Functions (Admin SDK) qui écrivent aussi auditLogs.
+  // ============================================================
+
+  match /databases/{database}/documents {
+
+    // ----------------------------------------------------------
+    // Helpers
+    // ----------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDocExists(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid));
+    }
+
+    function getUserData(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data;
+    }
+
+    // Rôle d'un utilisateur. 'none' si le profil n'existe pas
+    // (couvre les cas limite sans lever d'erreur).
+    function getUserRole(uid) {
+      return userDocExists(uid) ? getUserData(uid).role : 'none';
+    }
+
+    function isAdmin() {
+      return isSignedIn() && getUserRole(request.auth.uid) == 'admin';
+    }
+
+    function isModerator() {
+      return isSignedIn() && getUserRole(request.auth.uid) in ['moderator', 'admin'];
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isBanned(uid) {
+      return userDocExists(uid) && getUserData(uid).banned == true;
+    }
+
+    // Un compte peut créer du contenu : connecté, profil présent,
+    // non banni.
+    function canAct() {
+      return isSignedIn() && userDocExists(request.auth.uid) && !isBanned(request.auth.uid);
+    }
+
+    // L'utilisateur suit-il l'auteur ? (collection `follows`,
+    // prévue pour une phase ultérieure. Par défaut : non.)
+    function followsAuthor(authorId) {
+      return exists(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + authorId));
+    }
+
+    // Un post (données déjà récupérées) est-il lisible ?
+    function isPostDataReadable(data) {
+      return isSignedIn()
+        && (data.authorId == request.auth.uid
+            || isModerator()
+            || (!('deletedAt' in data)
+                && data.moderationStatus == 'visible'
+                && (data.visibility == 'public'
+                    || (data.visibility == 'followers' && followsAuthor(data.authorId)))));
+    }
+
+    // Un post est-il lisible par le demandeur ? (appelé avec `get`)
+    function isPostReadable(postId) {
+      return isSignedIn()
+        && (isModerator()
+            || (exists(/databases/$(database)/documents/posts/$(postId))
+                && isPostDataReadable(get(/databases/$(database)/documents/posts/$(postId)).data)));
+    }
+
+    function validReason(reason) {
+      return reason in ['illegal', 'harassment', 'spam', 'hate', 'sexual', 'violence', 'doxxing', 'fraud', 'other'];
+    }
+
+    // ----------------------------------------------------------
+    // users/{userId}
+    // Champs publics : uid, displayName, bio, avatarPath, createdAt,
+    // updatedAt.
+    // Champs système (jamais écrits par un client) : role, banned,
+    // bannedUntil, moderationStatus, moderationNote, postCount,
+    // reportCount, likeCount.
+    // ----------------------------------------------------------
+    match /users/{userId} {
+      allow read: if isSignedIn();
+
+      // Création du profil : l'utilisateur ne peut créer QUE son
+      // propre profil, avec le rôle par défaut 'user', non banni.
+      allow create: if isOwner(userId)
+        && request.resource.data.uid == userId
+        && request.resource.data.role == 'user'
+        && request.resource.data.banned == false
+        && !('bannedUntil' in request.resource.data)
+        && request.resource.data.moderationStatus == 'none'
+        && request.resource.data.postCount == 0
+        && request.resource.data.reportCount == 0
+        && request.resource.data.likeCount == 0
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.keys().hasOnly([
+          'uid', 'displayName', 'bio', 'avatarPath', 'createdAt',
+          'updatedAt', 'role', 'banned', 'moderationStatus',
+          'postCount', 'reportCount', 'likeCount'
+        ]);
+
+      // Mise à jour par le propriétaire : champs de profil uniquement.
+      // Interdit de toucher role, banned, moderationStatus, counters.
+      allow update: if isOwner(userId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['displayName', 'bio', 'avatarPath', 'updatedAt'])
+        && request.resource.data.uid == userId
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.banned == resource.data.banned
+        && request.resource.data.moderationStatus == resource.data.moderationStatus
+        && request.resource.data.postCount == resource.data.postCount
+        && request.resource.data.reportCount == resource.data.reportCount
+        && request.resource.data.likeCount == resource.data.likeCount;
+
+      // Suppression de profil : jamais via un client.
+      allow delete: if false;
+    }
+
+    // ----------------------------------------------------------
+    // posts/{postId}
+    // Champs système : likeCount, commentCount, reportCount,
+    // shareCount (incréments via Cloud Functions uniquement),
+    // moderationStatus, moderationReason, moderatorId, moderatedAt.
+    // ----------------------------------------------------------
+    match /posts/{postId} {
+      allow read: if isPostDataReadable(resource.data);
+
+      allow create: if canAct()
+        && request.resource.data.authorId == request.auth.uid
+        && 'content' in request.resource.data
+        && request.resource.data.content is string
+        && request.resource.data.content.size() > 0
+        && request.resource.data.content.size() <= 5000
+        && request.resource.data.type in ['text', 'image', 'video', 'audio']
+        && request.resource.data.visibility in ['public', 'followers', 'private']
+        && request.resource.data.moderationStatus == 'visible'
+        && !('deletedAt' in request.resource.data)
+        && request.resource.data.likeCount == 0
+        && request.resource.data.commentCount == 0
+        && request.resource.data.reportCount == 0
+        && request.resource.data.shareCount == 0
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.keys().hasOnly([
+          'authorId', 'authorName', 'content', 'type', 'visibility',
+          'mediaPaths', 'createdAt', 'updatedAt', 'likeCount',
+          'commentCount', 'reportCount', 'shareCount', 'moderationStatus'
+        ]);
+
+      // L'auteur peut modifier contenu, visibilité et médias.
+      // Jamais les compteurs ni les champs de modération.
+      allow update: if isOwner(resource.data.authorId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['content', 'visibility', 'mediaPaths', 'updatedAt'])
+        && request.resource.data.authorId == resource.data.authorId
+        && request.resource.data.moderationStatus == resource.data.moderationStatus
+        && request.resource.data.likeCount == resource.data.likeCount
+        && request.resource.data.commentCount == resource.data.commentCount
+        && request.resource.data.reportCount == resource.data.reportCount
+        && request.resource.data.shareCount == resource.data.shareCount;
+
+      // Suppression : uniquement l'auteur du post.
+      allow delete: if isOwner(resource.data.authorId);
+    }
+
+    // ----------------------------------------------------------
+    // comments/{commentId}
+    // ----------------------------------------------------------
+    match /comments/{commentId} {
+      allow read: if isPostReadable(resource.data.postId);
+
+      allow create: if canAct()
+        && request.resource.data.authorId == request.auth.uid
+        && 'postId' in request.resource.data
+        && request.resource.data.postId is string
+        && isPostReadable(request.resource.data.postId)
+        && 'content' in request.resource.data
+        && request.resource.data.content is string
+        && request.resource.data.content.size() > 0
+        && request.resource.data.content.size() <= 2000
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.keys().hasOnly([
+          'postId', 'authorId', 'content', 'replyToId', 'createdAt',
+          'updatedAt', 'moderationStatus', 'deletedAt'
+        ]);
+
+      allow update: if isOwner(resource.data.authorId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['content', 'updatedAt'])
+        && request.resource.data.postId == resource.data.postId
+        && request.resource.data.authorId == resource.data.authorId
+        && request.resource.data.moderationStatus == resource.data.moderationStatus;
+
+      allow delete: if isOwner(resource.data.authorId);
+    }
+
+    // ----------------------------------------------------------
+    // reports/{reportId}
+    // DÉDUPLICATION : reportId = `${reporterId}_${targetType}_${targetId}`.
+    // Un même utilisateur ne peut donc créer qu'UN signalement par
+    // cible. Le doc id déterministe rend l'écrasement impossible
+    // (un second signalement serait un update → refusé).
+    // AUCUN signalement ne supprime, ne masque ni ne modifie un post.
+    // ----------------------------------------------------------
+    match /reports/{reportId} {
+      allow create: if canAct()
+        && request.resource.data.reporterId == request.auth.uid
+        && request.resource.data.reportId == reportId
+        && reportId == request.auth.uid + '_' + request.resource.data.targetType + '_' + request.resource.data.targetId
+        && request.resource.data.targetType in ['post', 'comment', 'user']
+        && request.resource.data.targetId is string
+        && request.resource.data.targetId.size() > 0
+        && validReason(request.resource.data.reason)
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt is timestamp
+        // La cible doit exister.
+        && (request.resource.data.targetType != 'post'
+            || exists(/databases/$(database)/documents/posts/$(request.resource.data.targetId)))
+        && request.resource.data.keys().hasOnly([
+          'reporterId', 'reportId', 'targetType', 'targetId',
+          'reason', 'details', 'status', 'createdAt'
+        ]);
+
+      // L'auteur du signalement peut le lire ; les modérateurs
+      // peuvent tout lire.
+      allow read: if isSignedIn()
+        && (request.auth.uid == resource.data.reporterId || isModerator());
+
+      // Le statut/résolution d'un signalement n'est modifiable que
+      // par les Cloud Functions (Admin SDK), pour traçabilité.
+      allow update, delete: if false;
+    }
+
+    // ----------------------------------------------------------
+    // moderationQueue/{queueId}
+    // Créée et mise à jour par les Cloud Functions (déclencheurs
+    // onReportCreated + actions de modération). Aucun client ne peut
+    // écrire ici. États : pending, reviewing, resolved, dismissed.
+    // ----------------------------------------------------------
+    match /moderationQueue/{queueId} {
+      allow read: if isSignedIn() && isModerator();
+      allow create, update, delete: if false;
+    }
+
+    // ----------------------------------------------------------
+    // notifications/{notificationId}
+    // Créées par les Cloud Functions. Le destinataire peut uniquement
+    // marquer ses notifications comme lues.
+    // ----------------------------------------------------------
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn()
+        && (resource.data.recipientId == request.auth.uid || isAdmin());
+
+      allow update: if isSignedIn()
+        && resource.data.recipientId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['read', 'readAt'])
+        && request.resource.data.recipientId == resource.data.recipientId;
+
+      allow create, delete: if false;
+    }
+
+    // ----------------------------------------------------------
+    // auditLogs/{logId}
+    // Journal des actions administratives et de modération. Écrit
+    // EXCLUSIVEMENT par les Cloud Functions (Admin SDK). Lecture
+    // réservée aux administrateurs.
+    // ----------------------------------------------------------
+    match /auditLogs/{logId} {
+      allow read: if isSignedIn() && isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    // ----------------------------------------------------------
+    // Collections prévues pour les phases suivantes (DENY BY DEFAULT
+    // jusqu'à implémentation) : follows, likes, appeals, messages,
+    // hashtags, creatorStats.
+    // ----------------------------------------------------------
+    match /follows/{docId} {
+      allow read, write: if false;
+    }
+    match /likes/{docId} {
+      allow read, write: if false;
+    }
+    match /appeals/{docId} {
+      allow read, write: if false;
+    }
+    match /messages/{docId} {
+      allow read, write: if false;
+    }
+    match /hashtags/{docId} {
+      allow read, write: if false;
+    }
+    match /creatorStats/{docId} {
+      allow read, write: if false;
+    }
+
+    // Toute autre collection : refus systématique.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

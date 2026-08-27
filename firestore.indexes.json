@@ -1,0 +1,21 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "reports",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "targetId", "order": "ASC" },
+        { "fieldPath": "status", "order": "ASC" }
+      ]
+    },
+    {
+      "collectionGroup": "moderationQueue",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASC" },
+        { "fieldPath": "createdAt", "order": "DESC" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
