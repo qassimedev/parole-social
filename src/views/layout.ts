@@ -54,7 +54,10 @@ export function authShell(inner: string): string {
 }
 
 // Shell pour les pages de l'application (connecté).
-export function appShell(inner: string, active = ''): string {
+// `canModerate` ajoute la navigation vers l'espace de modération
+// (réservée aux modérateurs/admins ; l'accès réel reste contrôlé
+// par la route et par les règles/Functions, pas par l'affichage).
+export function appShell(inner: string, active = '', canModerate = false): string {
   const link = (name: string, href: string, label: string) =>
     `<a class="nav__link${active === name ? ' nav__link--active' : ''}" href="${href}">${label}</a>`;
   return `
@@ -68,11 +71,16 @@ export function appShell(inner: string, active = ''): string {
           ${link('home', '#/', 'Accueil')}
           ${link('profile', '#/profile', 'Profil')}
           ${link('settings', '#/settings', 'Paramètres')}
+          ${canModerate ? link('moderation', '#/moderation', 'Modération') : ''}
         </nav>
       </header>
       <main class="page">${inner}</main>
     </div>
   `;
+}
+
+export function isModeratorRole(role: string | undefined): boolean {
+  return role === 'moderator' || role === 'admin';
 }
 
 export interface FieldOpts {

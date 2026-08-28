@@ -96,7 +96,7 @@ export function mountSignup(root: HTMLElement, ctx: ViewContext): void {
 
     setSubmitting(form, true);
     try {
-      await register(values);
+      await register(values.displayName, values.email, values.password);
       ctx.navigate('/verify-email');
     } catch (err) {
       alerts.innerHTML = alertMarkup(describeError(err), 'error');

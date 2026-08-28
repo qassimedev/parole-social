@@ -10,7 +10,8 @@
     "source": "functions",
     "predeploy": [
       "npm --prefix functions run build"
-    ]
+    ],
+    "runtime": "nodejs20"
   },
   "hosting": {
     "public": "dist",

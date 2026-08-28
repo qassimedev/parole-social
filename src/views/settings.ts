@@ -7,6 +7,7 @@ import {
   alertMarkup,
   escapeHtml,
   fieldMarkup,
+  isModeratorRole,
   type ViewContext,
 } from './layout';
 
@@ -87,7 +88,7 @@ export function renderSettings(ctx: ViewContext): string {
       </p>
     </section>
   `;
-  return appShell(inner, 'settings');
+  return appShell(inner, 'settings', isModeratorRole(profile?.role));
 }
 
 export function mountSettings(root: HTMLElement, ctx: ViewContext): void {

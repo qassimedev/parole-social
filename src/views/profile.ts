@@ -13,6 +13,7 @@ import {
   avatarMarkup,
   escapeHtml,
   fieldMarkup,
+  isModeratorRole,
   textareaMarkup,
   type ViewContext,
 } from './layout';
@@ -23,7 +24,7 @@ interface ProfileState {
 }
 
 function publicInfoMarkup(profile: UserProfile): string {
-  const createdAt = profile.createdAt?.toDate().toLocaleDateString('fr-FR') ?? '—';
+  const createdAt = profile.createdAt?.toLocaleDateString('fr-FR') ?? '—';
   return `
     <details class="public-info">
       <summary>Consulter mes informations publiques</summary>
@@ -119,7 +120,7 @@ export function renderProfile(ctx: ViewContext): string {
       </section>
     `;
   }
-  return appShell(inner, 'profile');
+  return appShell(inner, 'profile', isModeratorRole(profile?.role));
 }
 
 function viewModeMarkup(ctx: ViewContext): string {
@@ -145,7 +146,7 @@ function viewModeMarkup(ctx: ViewContext): string {
 export function mountProfile(root: HTMLElement, ctx: ViewContext): void {
   const session = ctx.session;
   if (session.status !== 'signed-in') return;
-  const state: ProfileState = { mode: 'view', profile: session.profile };
+  const state: ProfileState = { mode: 'view', profile: session.profile ?? null };
   if (!state.profile) return;
 
   const avatarSlot = root.querySelector<HTMLDivElement>('#profile-avatar-slot');
@@ -196,7 +197,7 @@ export function mountProfile(root: HTMLElement, ctx: ViewContext): void {
       if (submitBtn) submitBtn.disabled = true;
 
       try {
-        await updateProfile(session.uid, { displayName, bio });
+        await updateProfile(session.uid!, { displayName, bio });
         notify('Profil mis à jour.', 'success');
         state.profile = { ...state.profile!, displayName: displayName.trim(), bio: bio.trim() };
         state.mode = 'view';
@@ -213,8 +214,8 @@ export function mountProfile(root: HTMLElement, ctx: ViewContext): void {
       if (!file) return;
       alerts.innerHTML = '';
       try {
-        const path = await uploadAvatar(session.uid, file);
-        await updateProfile(session.uid, { avatarPath: path });
+        const path = await uploadAvatar(session.uid!, file);
+        await updateProfile(session.uid!, { avatarPath: path });
         state.profile = { ...state.profile!, avatarPath: path };
         await loadAvatar(path, avatarSlot ?? undefined);
         notify('Photo de profil mise à jour.', 'success');
@@ -230,7 +231,7 @@ export function mountProfile(root: HTMLElement, ctx: ViewContext): void {
       alerts.innerHTML = '';
       removeAvatarBtn.disabled = true;
       try {
-        await removeAvatar(session.uid, path);
+        await removeAvatar(session.uid!, path);
         state.profile = { ...state.profile!, avatarPath: '' };
         await loadAvatar('', avatarSlot ?? undefined);
         notify('Photo de profil supprimée.', 'success');

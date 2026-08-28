@@ -104,7 +104,9 @@ export function mountEmailAction(root: HTMLElement, ctx: ViewContext): void {
   // mode === 'verifyEmail' : applique le code puis rafraîchit.
   void (async () => {
     try {
-      await handleEmailAction(ctx.route.params);
+      const params = new URLSearchParams();
+      ctx.route.params.forEach((value, key) => params.append(key, value));
+      await handleEmailAction(params);
       if (ctx.session.status === 'signed-in') {
         alerts.innerHTML = alertMarkup('Adresse email vérifiée. Bienvenue sur PAROLE !', 'success');
         window.setTimeout(() => ctx.navigate('/'), 1500);

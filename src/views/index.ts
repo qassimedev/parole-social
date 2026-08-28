@@ -16,6 +16,7 @@ import { renderEmailAction, mountEmailAction } from './email-action';
 import { renderHome, mountHome } from './home';
 import { renderProfile, mountProfile } from './profile';
 import { renderSettings, mountSettings } from './settings';
+import { renderModeration, mountModeration } from './moderation';
 
 export function splashView(): string {
   return `
@@ -36,7 +37,7 @@ function buildContext(): ViewContext {
     session: store.get(),
     route,
     navigate,
-    isEmulator: isEmulatorMode,
+    isEmulator: isEmulatorMode(),
   };
 }
 
@@ -98,10 +99,20 @@ export function renderView(root: HTMLElement): void {
       root.innerHTML = renderSettings(ctx);
       mountSettings(root, ctx);
       return;
+    case 'moderation':
+      // Accès réservé modérateur/admin : l'affichage n'est jamais
+      // une autorisation — les Cloud Functions valident le rôle.
+      if (session.profile?.role !== 'moderator' && session.profile?.role !== 'admin') {
+        navigate('/');
+        return;
+      }
+      root.innerHTML = renderModeration(ctx);
+      mountModeration(root, ctx);
+      return;
     case 'home':
     default:
       root.innerHTML = renderHome(ctx);
-      mountHome();
+      mountHome(root, ctx);
       return;
   }
 }
