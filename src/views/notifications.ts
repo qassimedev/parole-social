@@ -39,6 +39,8 @@ function notificationText(notification: AppNotification, actorName: string): str
       return `${actorName} vous suit maintenant.`;
     case 'share':
       return `${actorName} a partagé votre publication.`;
+    case 'reply':
+      return `${actorName} a répondu à votre commentaire.`;
   }
 }
 
@@ -148,7 +150,7 @@ export function mountNotifications(root: HTMLElement, ctx: ViewContext): void {
 
   const emptyMarkup = (): string => `
     <div class="notifications__empty muted">
-      Aucune notification pour le moment. Vos likes, commentaires et abonnements arrivent ici.
+      Aucune notification pour le moment. Vos likes, commentaires, réponses et abonnements arrivent ici.
     </div>
   `;
 

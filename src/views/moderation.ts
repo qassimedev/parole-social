@@ -11,7 +11,7 @@
 
 import { describeError } from '../lib/errors';
 import { notify } from '../lib/notify';
-import { fetchAuthorNames } from '../lib/comments';
+import { fetchAuthorNames, fetchComment, type Comment } from '../lib/comments';
 import { fetchPost, type Post } from '../lib/posts';
 import {
   fetchReports,
@@ -59,11 +59,21 @@ interface SanctionResult {
   action: string;
 }
 
+interface CommentModerateResult {
+  ok: boolean;
+  commentId: string;
+  moderationStatus: string;
+}
+
 const functions = getFunctionsInstance();
 const moderatePost = httpsCallable<{ postId: string; action: string; reason?: string }, ModerateResult>(
   functions,
   'moderatePost'
 );
+const moderateComment = httpsCallable<
+  { commentId: string; action: string; reason?: string },
+  CommentModerateResult
+>(functions, 'moderateComment');
 const sanctionUser = httpsCallable<
   { userId: string; action: string; reason?: string; role?: string },
   SanctionResult
@@ -102,7 +112,9 @@ function reportTargetLabel(targetType: ReportTargetType): string {
 function reportMarkup(
   report: Report,
   post: Post | null | undefined,
-  reporterName: string
+  comment: Comment | null | undefined,
+  reporterName: string,
+  isAdmin: boolean
 ): string {
   const reasonLabel = REPORT_REASON_LABELS[report.reason] ?? report.reason;
   const statusLabel = STATUS_LABELS[report.status] ?? report.status;
@@ -127,21 +139,46 @@ function reportMarkup(
           </p>
         </div>`
         : `<p class="muted">Publication introuvable ou supprimée.</p>`
-      : `<p class="muted">Cible : ${escapeHtml(reportTargetLabel(report.targetType))} ${escapeHtml(report.targetId)}</p>`;
+      : report.targetType === 'comment'
+        ? comment && comment.content
+          ? `
+        <div class="report-post">
+          <p class="report-post__content">${escapeHtml(comment.content)}</p>
+          <p class="report-post__meta muted">
+            Auteur : ${escapeHtml(comment.authorId)} ·
+            Statut : ${escapeHtml(comment.moderationStatus ?? 'visible')}
+          </p>
+        </div>`
+          : `<p class="muted">Commentaire introuvable ou supprimé.</p>`
+        : `<p class="muted">Cible : ${escapeHtml(reportTargetLabel(report.targetType))} ${escapeHtml(report.targetId)}</p>`;
 
-  const actions =
-    report.targetType === 'post' && post
-      ? `
-      <div class="actions">
-        ${MODERATION_ACTIONS.map(
-          (a) => `
-          <button type="button" class="btn btn--${a.kind} btn--sm mod-action"
-            data-post-id="${escapeHtml(report.targetId)}" data-action="${a.value}">
-            <span class="btn__label">${a.label}</span>
-          </button>`
-        ).join('\n')}
-      </div>`
-      : '';
+  const actionButtons = report.targetType === 'user'
+    ? `
+      <button type="button" class="btn btn--warn btn--sm mod-action"
+        data-user-id="${escapeHtml(report.targetId)}" data-action="warn">
+        <span class="btn__label">Avertir (warn)</span>
+      </button>
+      ${isAdmin ? `
+      <button type="button" class="btn btn--danger btn--sm mod-action"
+        data-user-id="${escapeHtml(report.targetId)}" data-action="ban">
+        <span class="btn__label">Bannir (ban)</span>
+      </button>` : ''}`
+    : MODERATION_ACTIONS.map(
+        (a) => `
+        <button type="button" class="btn btn--${a.kind} btn--sm mod-action"
+          data-target-type="${report.targetType}" data-target-id="${escapeHtml(report.targetId)}" data-action="${a.value}">
+          <span class="btn__label">${a.label}</span>
+        </button>`
+      ).join('\n');
+
+  const hasResolvableTarget =
+    (report.targetType === 'post' && post) ||
+    (report.targetType === 'comment' && comment && comment.content) ||
+    report.targetType === 'user';
+
+  const actions = hasResolvableTarget
+    ? `<div class="actions">${actionButtons}</div>`
+    : '';
 
   return `
     <article class="report-item">
@@ -242,6 +279,7 @@ export function mountModeration(root: HTMLElement, ctx: ViewContext): void {
   const reportsEl = root.querySelector<HTMLDivElement>('#mod-reports');
   const sanctionForm = root.querySelector<HTMLFormElement>('#sanction-form');
   const sanctionAlerts = root.querySelector<HTMLDivElement>('#sanction-alerts');
+  const isAdmin = role === 'admin';
 
   const loadReports = async (): Promise<void> => {
     if (!reportsEl) return;
@@ -249,13 +287,18 @@ export function mountModeration(root: HTMLElement, ctx: ViewContext): void {
     try {
       const reports = await fetchReports();
       const postTargets = reports.filter((r) => r.targetType === 'post');
-      const [postEntries, authorNames] = await Promise.all([
+      const commentTargets = reports.filter((r) => r.targetType === 'comment');
+      const [postEntries, commentEntries, authorNames] = await Promise.all([
         Promise.all(
           postTargets.map(async (r) => ({ reportId: r.id, post: await fetchPost(r.targetId) }))
+        ),
+        Promise.all(
+          commentTargets.map(async (r) => ({ reportId: r.id, comment: await fetchComment(r.targetId) }))
         ),
         fetchAuthorNames(reports.map((r) => r.reporterId)),
       ]);
       const postMap = new Map(postEntries.map((p) => [p.reportId, p.post]));
+      const commentMap = new Map(commentEntries.map((c) => [c.reportId, c.comment]));
 
       if (reports.length === 0) {
         reportsEl.innerHTML = reportsEmptyMarkup();
@@ -266,7 +309,9 @@ export function mountModeration(root: HTMLElement, ctx: ViewContext): void {
           reportMarkup(
             report,
             postMap.get(report.id),
-            authorNames.get(report.reporterId) ?? report.reporterId
+            commentMap.get(report.id),
+            authorNames.get(report.reporterId) ?? report.reporterId,
+            isAdmin
           )
         )
         .join('\n');
@@ -282,12 +327,22 @@ export function mountModeration(root: HTMLElement, ctx: ViewContext): void {
   const bindModerationActions = (container: HTMLElement, reload: () => Promise<void>): void => {
     container.querySelectorAll<HTMLButtonElement>('.mod-action').forEach((btn) => {
       btn.addEventListener('click', async () => {
-        const postId = btn.dataset.postId;
+        const targetType = btn.dataset.targetType as 'post' | 'comment' | 'user' | undefined;
+        const targetId = btn.dataset.targetId;
+        const userId = btn.dataset.userId;
         const action = btn.dataset.action;
-        if (!postId || !action || !VALID_ACTIONS.includes(action)) return;
+        if (!action) return;
         btn.disabled = true;
         try {
-          await moderatePost({ postId, action });
+          if (targetType === 'comment' && targetId) {
+            await moderateComment({ commentId: targetId, action });
+          } else if (targetType === 'post' && targetId && VALID_ACTIONS.includes(action)) {
+            await moderatePost({ postId: targetId, action });
+          } else if (userId && (action === 'warn' || action === 'ban')) {
+            await sanctionUser({ userId, action });
+          } else {
+            return;
+          }
           notify('Action de modération appliquée.', 'success');
           await reload();
         } catch (err) {

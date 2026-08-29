@@ -86,6 +86,18 @@ export async function fetchComments(postId: string): Promise<Comment[]> {
 }
 
 // ------------------------------------------------------------
+// Récupération d'un commentaire par son id (utilisé par la
+// modération pour afficher la cible d'un signalement de type
+// 'comment'). Retourne null si le commentaire n'existe pas.
+// ------------------------------------------------------------
+export async function fetchComment(commentId: string): Promise<Comment | null> {
+  if (!commentId) return null;
+  const snap = await getDoc(doc(db, 'comments', commentId));
+  if (!snap.exists()) return null;
+  return snapshotToComment(snap);
+}
+
+// ------------------------------------------------------------
 // Création d'un commentaire texte par le client.
 // `commentId` = id du commentaire parent pour une réponse (thread),
 // vide ('') pour un commentaire racine. Les champs sont strictement

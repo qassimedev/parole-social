@@ -6,7 +6,11 @@ import {
 } from 'firebase-functions/v2/firestore';
 import { initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { FieldValue, getFirestore } from 'firebase-admin/firestore';
+import {
+  FieldValue,
+  getFirestore,
+  type WriteBatch,
+} from 'firebase-admin/firestore';
 import * as logger from 'firebase-functions/logger';
 
 // ============================================================
@@ -103,13 +107,77 @@ async function logAudit(
   });
 }
 
+// Résout l'utilisateur « propriétaire » d'une cible signalée, pour
+// maintenir users.reportCount (nombre de signalements REÇUS).
+// - post    -> posts/{targetId}.authorId
+// - comment -> comments/{targetId}.authorId
+// - user    -> users/{targetId} elle-même
+// Retourne l'id du propriétaire, ou undefined si la cible n'existe
+// pas (défensif : on ne peut pas comptabiliser une cible absente).
+async function resolveReportTargetOwner(
+  targetType: string,
+  targetId: string
+): Promise<string | undefined> {
+  const ref =
+    targetType === 'user'
+      ? db.doc(`users/${targetId}`)
+      : targetType === 'comment'
+        ? db.doc(`comments/${targetId}`)
+        : db.doc(`posts/${targetId}`);
+  const snap = await ref.get();
+  if (!snap.exists) {
+    return undefined;
+  }
+  if (targetType === 'user') {
+    return targetId;
+  }
+  const authorId = snap.data()?.authorId as string | undefined;
+  return typeof authorId === 'string' && authorId.length > 0 ? authorId : undefined;
+}
+
+// Résout les signalements PENDANTS d'une cible (post, comment ou
+// user) vers un statut de clôture, avec une résolution traçée.
+// Factorisé pour être partagé par moderatePost / moderateComment /
+// sanctionUser. Retourne le nombre de signalements résolus.
+async function resolveTargetReports(params: {
+  targetType: 'post' | 'comment' | 'user';
+  targetId: string;
+  status: string;
+  action: string;
+  reason: string;
+  moderatorId: string;
+  batch: WriteBatch;
+}): Promise<number> {
+  const pending = await db
+    .collection('reports')
+    .where('targetType', '==', params.targetType)
+    .where('targetId', '==', params.targetId)
+    .where('status', '==', 'pending')
+    .get();
+
+  let count = 0;
+  for (const report of pending.docs) {
+    params.batch.update(report.ref, {
+      status: params.status,
+      resolution: {
+        action: params.action,
+        reason: params.reason,
+        moderatorId: params.moderatorId,
+        resolvedAt: serverTimestamp(),
+      },
+    });
+    count += 1;
+  }
+  return count;
+}
+
 // ------------------------------------------------------------
 // Notifications (Phase 5)
 // Créées exclusivement ici (Admin SDK) — le client ne peut ni les
 // créer, ni les supprimer (règles Firestore). Champs STRICTEMENT
 // présents à chaque création. Aucune notification à soi-même.
 // ------------------------------------------------------------
-const NOTIFICATION_TYPES = ['like', 'comment', 'follow', 'share'] as const;
+const NOTIFICATION_TYPES = ['like', 'comment', 'follow', 'share', 'reply'] as const;
 type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
 async function createNotification(params: {
@@ -324,7 +392,8 @@ export const moderatePost = onCall(
 
     const moderationStatus = POST_STATUS_BY_ACTION[action];
 
-    await postRef.update({
+    const batch = db.batch();
+    batch.update(postRef, {
       moderationStatus,
       moderationReason: reason.trim() ? reason.trim() : null,
       moderatorId: actor.uid,
@@ -332,26 +401,16 @@ export const moderatePost = onCall(
     });
 
     // Résolution des signalements pendants liés à ce post.
-    const pending = await db
-      .collection('reports')
-      .where('targetId', '==', postId)
-      .where('status', '==', 'pending')
-      .get();
-
     const queueStatus = QUEUE_STATUS_BY_ACTION[action];
-    const batch = db.batch();
-
-    for (const report of pending.docs) {
-      batch.update(report.ref, {
-        status: queueStatus,
-        resolution: {
-          action,
-          reason,
-          moderatorId: actor.uid,
-          resolvedAt: serverTimestamp(),
-        },
-      });
-    }
+    await resolveTargetReports({
+      targetType: 'post',
+      targetId: postId,
+      status: queueStatus,
+      action,
+      reason,
+      moderatorId: actor.uid,
+      batch,
+    });
 
     // Mise à jour de la file de modération.
     const queueRef = db.doc(`moderationQueue/post_${postId}`);
@@ -375,6 +434,99 @@ export const moderatePost = onCall(
 
     logger.info(`Post ${postId} moderated (${action}) by ${actor.uid}`);
     return { ok: true, postId, moderationStatus };
+  }
+);
+
+// ------------------------------------------------------------
+// Modération des commentaires
+// Actions : mask, restore, maintain, remove.
+// Met à jour le commentaire, résout les signalements pendants, met
+// à jour la file de modération et trace tout dans auditLogs.
+// NB : la règle de lecture des commentaires ne filtre pas
+// `moderationStatus` (lire tout) ; « masquer » enregistre donc la
+// décision et clôt les signalements sans retirer le commentaire de
+// la lecture (risque résiduel documenté).
+// ------------------------------------------------------------
+
+const COMMENT_STATUS_BY_ACTION: Record<string, string> = {
+  mask: 'hidden',
+  restore: 'visible',
+  maintain: 'visible',
+  remove: 'removed',
+};
+
+export const moderateComment = onCall(
+  { cors: true },
+  async (request) => {
+    const actor = await requireRole(request, ['moderator', 'admin']);
+    const data = (request.data ?? {}) as {
+      commentId?: unknown;
+      action?: unknown;
+      reason?: unknown;
+    };
+
+    if (typeof data.commentId !== 'string' || data.commentId.length === 0) {
+      throw new HttpsError('invalid-argument', 'commentId is required.');
+    }
+    if (typeof data.action !== 'string' || !(data.action in COMMENT_STATUS_BY_ACTION)) {
+      throw new HttpsError('invalid-argument', `Unknown moderation action: ${String(data.action)}`);
+    }
+
+    const commentId = data.commentId;
+    const action = data.action;
+    const reason = typeof data.reason === 'string' ? data.reason : '';
+
+    const commentRef = db.doc(`comments/${commentId}`);
+    const comment = await commentRef.get();
+    if (!comment.exists) {
+      throw new HttpsError('not-found', 'Comment not found.');
+    }
+
+    const moderationStatus = COMMENT_STATUS_BY_ACTION[action];
+
+    const batch = db.batch();
+    batch.update(commentRef, {
+      moderationStatus,
+      moderationReason: reason.trim() ? reason.trim() : null,
+      moderatorId: actor.uid,
+      moderatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    // Résolution des signalements pendants liés à ce commentaire.
+    const queueStatus = QUEUE_STATUS_BY_ACTION[action];
+    await resolveTargetReports({
+      targetType: 'comment',
+      targetId: commentId,
+      status: queueStatus,
+      action,
+      reason,
+      moderatorId: actor.uid,
+      batch,
+    });
+
+    // Mise à jour de la file de modération.
+    const queueRef = db.doc(`moderationQueue/comment_${commentId}`);
+    const queueSnap = await queueRef.get();
+    if (queueSnap.exists) {
+      batch.update(queueRef, {
+        status: queueStatus,
+        resolution: {
+          action,
+          reason,
+          moderatorId: actor.uid,
+          resolvedAt: serverTimestamp(),
+        },
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    await batch.commit();
+
+    await logAudit(actor, `comment.${action}`, 'comment', commentId, { reason });
+
+    logger.info(`Comment ${commentId} moderated (${action}) by ${actor.uid}`);
+    return { ok: true, commentId, moderationStatus };
   }
 );
 
@@ -447,6 +599,39 @@ export const sanctionUser = onCall(
         break;
     }
 
+    // Avertir ou bannir : on résout aussi les signalements utilisateur
+    // pendants contre cette cible et on clôt sa file de modération
+    // (le signalement DÉCISIF justifie la sanction). setRole/unban ne
+    // clôturent pas : ils sont mécaniques, sans lien avec les
+    // signalements en cours.
+    if (action === 'warn' || action === 'ban') {
+      const batch = db.batch();
+      await resolveTargetReports({
+        targetType: 'user',
+        targetId: userId,
+        status: 'resolved',
+        action,
+        reason,
+        moderatorId: actor.uid,
+        batch,
+      });
+      const queueRef = db.doc(`moderationQueue/user_${userId}`);
+      const queueSnap = await queueRef.get();
+      if (queueSnap.exists) {
+        batch.update(queueRef, {
+          status: 'resolved',
+          resolution: {
+            action,
+            reason,
+            moderatorId: actor.uid,
+            resolvedAt: serverTimestamp(),
+          },
+          updatedAt: serverTimestamp(),
+        });
+      }
+      await batch.commit();
+    }
+
     await logAudit(actor, `user.${action}`, 'user', userId, {
       reason,
       ...(action === 'setRole' ? { role: data.role } : {}),
@@ -473,8 +658,24 @@ export const onReportCreated = onDocumentCreated('reports/{reportId}', async (ev
   const reporterId = data.reporterId as string;
   const reason = typeof data.reason === 'string' ? data.reason : '';
 
+  // Compteurs « signalements reçus » :
+  // - post    -> posts/{targetId}.reportCount
+  // - comment -> users/{auteur du commentaire}.reportCount
+  // - user    -> users/{targetId}.reportCount
+  // users.reportCount est NULL si l'auteur de la cible n'existe pas
+  // (défensif : plus de « compteur mort » — il est désormais
+  // maintenu par trigger et calculé sur le propriétaire de la cible).
   if (targetType === 'post') {
-    await db.doc(`posts/${targetId}`).update({ reportCount: FieldValue.increment(1) });
+    try {
+      await db.doc(`posts/${targetId}`).update({ reportCount: FieldValue.increment(1) });
+    } catch (err) {
+      logger.warn(`onReportCreated: post ${targetId} not found (${(err as Error).message})`);
+    }
+  } else {
+    const ownerId = await resolveReportTargetOwner(targetType, targetId);
+    if (ownerId) {
+      await db.doc(`users/${ownerId}`).update({ reportCount: FieldValue.increment(1) });
+    }
   }
 
   const queueRef = db.doc(`moderationQueue/${targetType}_${targetId}`);
@@ -509,10 +710,53 @@ export const onReportCreated = onDocumentCreated('reports/{reportId}', async (ev
   logger.info(`Report registered on ${targetType} ${targetId} by ${reporterId}`);
 });
 
+// Décrément DÉFENSIF du compteur « signalements reçus » au retrait
+// d'un signalement (le client ne peut pas supprimer un signalement,
+// mais le serveur reste robuste — par ex. un nettoyage manuel).
+// Un signalement supprimé = un décrément. Pour post, posts.reportCount ;
+// pour comment/user, users.reportCount de l'auteur résolu.
+// Les compteurs ne passent pas en dessous de 0 (borné).
+export const onReportDeleted = onDocumentDeleted('reports/{reportId}', async (event) => {
+  const data = event.data?.data();
+  const targetType = data?.targetType as string | undefined;
+  const targetId = data?.targetId as string | undefined;
+  if (!targetType || !targetId) {
+    return;
+  }
+
+  const decr = { reportCount: FieldValue.increment(-1) };
+
+  if (targetType === 'post') {
+    const postSnap = await db.doc(`posts/${targetId}`).get();
+    if (!postSnap.exists) {
+      return;
+    }
+    const current = postSnap.data()?.reportCount as number | undefined;
+    if (typeof current === 'number' && current > 0) {
+      await postSnap.ref.update(decr);
+    }
+    return;
+  }
+
+  const ownerId = await resolveReportTargetOwner(targetType, targetId);
+  if (!ownerId) {
+    return;
+  }
+  const ownerSnap = await db.doc(`users/${ownerId}`).get();
+  if (!ownerSnap.exists) {
+    return;
+  }
+  const current = ownerSnap.data()?.reportCount as number | undefined;
+  if (typeof current === 'number' && current > 0) {
+    await ownerSnap.ref.update(decr);
+  }
+});
+
 export const onCommentCreated = onDocumentCreated('comments/{commentId}', async (event) => {
   const data = event.data?.data();
   const postId = data?.postId as string | undefined;
   const authorId = data?.authorId as string | undefined;
+  const replyToId = data?.replyToId as string | undefined;
   const commentId = event.params.commentId;
 
   if (postId) {
@@ -529,6 +773,29 @@ export const onCommentCreated = onDocumentCreated('comments/{commentId}', async 
           recipientId: postAuthor,
           actorId: authorId,
           type: 'comment',
+          postId,
+          commentId,
+        });
+      }
+    }
+  }
+
+  // Notification de RÉPONSE : si le commentaire répond à un
+  // commentaire parent (replyToId non vide), on notifie l'auteur du
+  // commentaire parent (jamais pour un self-reply et jamais si c'est
+  // déjà le propriétaire du post déjà notifié ci-dessus — on évite
+  // ainsi une notification dupliquée au même destinataire).
+  if (authorId && replyToId && replyToId.length > 0) {
+    const parentSnap = await db.doc(`comments/${replyToId}`).get();
+    if (parentSnap.exists) {
+      const parentAuthor = parentSnap.data()?.authorId as string | undefined;
+      const postSnap = postId ? await db.doc(`posts/${postId}`).get() : null;
+      const postAuthor = postSnap?.exists ? (postSnap.data()?.authorId as string | undefined) : undefined;
+      if (parentAuthor && parentAuthor !== authorId && parentAuthor !== postAuthor) {
+        await createNotification({
+          recipientId: parentAuthor,
+          actorId: authorId,
+          type: 'reply',
           postId,
           commentId,
         });

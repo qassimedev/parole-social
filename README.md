@@ -153,6 +153,8 @@ Functions (`moderatePost`).
 Comme les posts : lecture conditionnée à la lisibilité du post parent,
 création si le post est lisible, modification du contenu par l'auteur,
 suppression par l'auteur. `postId`/`authorId`/`moderationStatus` immuables côté client.
+- Création : `moderationStatus` forcé à `'visible'` (un client ne peut pas créer
+  un commentaire déjà masqué — durcissement aligné sur les posts).
 - **Visibilité des commentaires modérés** : un utilisateur normal (y compris
   l'auteur du post parent) ne lit que les commentaires
   `moderationStatus == 'visible'`. La règle de lecture exige
@@ -265,6 +267,9 @@ Types de notifications (jamais pour soi-même) :
 - `comment` : quelqu'un a commenté votre publication → propriétaire du post.
 - `follow` : quelqu'un vous suit → utilisateur suivi.
 - `share` : quelqu'un a partagé votre publication → propriétaire du post.
+- `reply` : quelqu'un a répondu à votre commentaire → auteur du commentaire parent
+  (jamais pour un self-reply, et pas de doublon si l'auteur du parent est déjà
+  le propriétaire du post notifié par la notification `comment`).
 
 Page `#/notifications` : liste (chargement / vide / erreur + Réessayer), état
 lu/non lu, date, nom de l'acteur (lien `#/u/{actorId}`), bouton « Marquer comme
@@ -299,6 +304,7 @@ Journal append-only des actions administratives et de modération.
 | Écrire auditLogs | ✖ | ✖ | ✖ (Functions) |
 | Modifier un rôle / bannir | ✖ | ✖ (warn via Functions) | ✔ (via Functions) |
 | Masquer/rétablir/retirer un post | ✖ | ✔ (via Functions) | ✔ (via Functions) |
+| Masquer/rétablir/retirer un commentaire | ✖ | ✔ (via Functions) | ✔ (via Functions) |
 
 **Sécurité des données sensibles** : un utilisateur ne peut **jamais**
 modifier lui-même son `role`, son statut administrateur, son statut de
@@ -321,9 +327,11 @@ modération, les compteurs système, les décisions de modération, les
 |---|---|---|---|
 | `registerUser` | callable | — (public) | création de compte : validation email/mot de passe/nom affiché, limitation de débit, utilisateur Auth + profil Firestore conforme aux règles (rôle `user`, non banni, compteurs à zéro) |
 | `moderatePost` | callable | moderator/admin | mask/restore/maintain/remove d'un post, résout les signalements pendants, met à jour la file, écrit `auditLogs` |
-| `sanctionUser` | callable | moderator (warn) / admin (ban, unban, setRole) | warn/ban/unban/changement de rôle, écrit `auditLogs` |
-| `onReportCreated` | trigger | — | incrémente `post.reportCount`, crée/met à jour la file de modération |
-| `onCommentCreated` | trigger | — | incrémente `post.commentCount` + notification « comment » au propriétaire du post |
+| `moderateComment` | callable | moderator/admin | mask/restore/maintain/remove d'un commentaire, résout les signalements pendants, met à jour la file, écrit `auditLogs` |
+| `sanctionUser` | callable | moderator (warn) / admin (ban, unban, setRole) | warn/ban/unban/changement de rôle ; warn/ban résolvent aussi les signalements utilisateur pendants et clôturent la file, écrit `auditLogs` |
+| `onReportCreated` | trigger | — | incrémente `post.reportCount` (post) ou `users.reportCount` de l'auteur de la cible (commentaire/utilisateur), crée/met à jour la file de modération |
+| `onReportDeleted` | trigger | — | décrément défensif (`post.reportCount` ou `users.reportCount` de l'auteur de la cible, borné à ≥ 0) |
+| `onCommentCreated` | trigger | — | incrémente `post.commentCount` + notification « comment » au propriétaire du post + notification « reply » à l'auteur du commentaire parent le cas échéant |
 | `onCommentDeleted` | trigger | — | décrémente `post.commentCount` |
 | `onLikeCreated` (Phase 3) | trigger | — | incrémente `post.likeCount` et `users.likeCount` (likes reçus) + notification « like » au propriétaire du post |
 | `onLikeDeleted` (Phase 3) | trigger | — | décrémente `post.likeCount` et `users.likeCount` (likes reçus) |
@@ -338,8 +346,9 @@ modération, les compteurs système, les décisions de modération, les
 
 Les notifications listent **uniquement** les champs du schéma (schema strict) :
 `recipientId`, `actorId`, `type`, `postId`, `commentId`, `read`, `readAt`,
-`createdAt`. `replyToId` reste `''` pour cette phase : pas encore d'UI de
-réponse, donc pas de notification à l'auteur d'un commentaire parent.
+`createdAt`. Un commentaire avec un `replyToId` non vide (réponse dans un thread)
+déclenche en plus une notification de type `reply` à l'auteur du commentaire
+parent (voir types ci-dessus).
 
 ## Index Firestore
 

@@ -966,6 +966,294 @@ test('C9  registerUser : email déjà utilisé REFUS', async () => {
   );
 });
 
+// ------------------------------------------------------------
+// Dette P3 — Notifications de réponse (type 'reply')
+// Un commentaire avec replyToId non vide notifie l'auteur du
+// commentaire parent (jamais pour un self-reply, jamais si c'est
+// déjà l'auteur du post — pas de doublon). On vérifie aussi que le
+// compteur users.notificationCount est bien incrémenté.
+// ------------------------------------------------------------
+test('R1 onCommentCreated : notification reply créée pour l’auteur du commentaire parent', async () => {
+  await seedProfile('postownerR1', 'user');
+  await seedProfile('rootcommentR1', 'user');
+  await seedProfile('replierR1', 'user');
+
+  const postRef = await seedPost('postownerR1');
+  const postId = postRef.id;
+
+  const rootRef = await db.collection('comments').add({
+    postId, authorId: 'rootcommentR1', content: 'Commentaire racine', replyToId: '',
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+  const rootId = rootRef.id;
+
+  const replyRef = await db.collection('comments').add({
+    postId, authorId: 'replierR1', content: 'Une réponse', replyToId: rootId,
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+  const replyId = replyRef.id;
+
+  const notifications = await waitFor(async () => {
+    const snap = await db
+      .collection('notifications')
+      .where('actorId', '==', 'replierR1')
+      .where('type', '==', 'reply')
+      .get();
+    return snap.size > 0 ? snap.docs : null;
+  });
+  const n = notifications[0].data();
+  if (n.recipientId !== 'rootcommentR1' || n.type !== 'reply') {
+    throw new Error(`Notification reply incohérente : ${JSON.stringify(n)}`);
+  }
+  if (n.postId !== postId || n.commentId !== replyId || n.read !== false || n.readAt !== null) {
+    throw new Error(`Schéma de la notification reply incohérent : ${JSON.stringify(n)}`);
+  }
+});
+
+test('R2 onCommentCreated : réponse à soi-même → aucune notification reply', async () => {
+  await seedProfile('postownerR2', 'user');
+  await seedProfile('selfR2', 'user');
+  const postRef = await seedPost('postownerR2');
+  const postId = postRef.id;
+
+  const rootRef = await db.collection('comments').add({
+    postId, authorId: 'selfR2', content: 'Racine', replyToId: '',
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+  const rootId = rootRef.id;
+
+  await db.collection('comments').add({
+    postId, authorId: 'selfR2', content: 'Self-reply', replyToId: rootId,
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+
+  await waitFor(async () => {
+    const snap = await postRef.get();
+    return snap.data()?.commentCount === 2;
+  });
+  await sleep(1000);
+  const snap = await db
+    .collection('notifications')
+    .where('actorId', '==', 'selfR2')
+    .where('type', '==', 'reply')
+    .get();
+  if (snap.size > 0) {
+    throw new Error('Aucune notification reply ne devrait exister pour une réponse à soi-même.');
+  }
+});
+
+test('R3 onCommentCreated : réponse à un commentaire de l’auteur du post → pas de doublon reply', async () => {
+  await seedProfile('ownerR3', 'user');
+  await seedProfile('replierR3', 'user');
+  const postRef = await seedPost('ownerR3');
+  const postId = postRef.id;
+
+  const parentRef = await db.collection('comments').add({
+    postId, authorId: 'ownerR3', content: 'Commentaire de l’auteur', replyToId: '',
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+  const parentId = parentRef.id;
+
+  await db.collection('comments').add({
+    postId, authorId: 'replierR3', content: 'Réponse', replyToId: parentId,
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+
+  await waitFor(async () => {
+    const snap = await postRef.get();
+    return snap.data()?.commentCount === 2;
+  });
+  await sleep(1000);
+  const snap = await db
+    .collection('notifications')
+    .where('actorId', '==', 'replierR3')
+    .where('type', '==', 'reply')
+    .get();
+  if (snap.size > 0) {
+    throw new Error('Aucune notification reply ne devrait être créée quand le parent est l’auteur du post.');
+  }
+});
+
+test('R4 onCommentCreated : réponse à un commentaire parent absent → pas de notification reply', async () => {
+  await seedProfile('postownerR4', 'user');
+  await seedProfile('replierR4', 'user');
+  const postRef = await seedPost('postownerR4');
+  const postId = postRef.id;
+
+  await db.collection('comments').add({
+    postId, authorId: 'replierR4', content: 'Réponse à un fantôme', replyToId: 'ghost_comment',
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+
+  await waitFor(async () => {
+    const snap = await postRef.get();
+    return snap.data()?.commentCount === 1;
+  });
+  await sleep(1000);
+  const snap = await db
+    .collection('notifications')
+    .where('actorId', '==', 'replierR4')
+    .where('type', '==', 'reply')
+    .get();
+  if (snap.size > 0) {
+    throw new Error('Aucune notification reply ne devrait exister pour un parent absent.');
+  }
+});
+
+test('R5 onCommentCreated : notification reply → notificationCount de l’auteur du parent +1', async () => {
+  await seedProfile('postownerR5', 'user');
+  await seedProfile('rootcommentR5', 'user');
+  await seedProfile('replierR5', 'user');
+  const postRef = await seedPost('postownerR5');
+  const postId = postRef.id;
+
+  const rootRef = await db.collection('comments').add({
+    postId, authorId: 'rootcommentR5', content: 'Racine', replyToId: '',
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+  const rootId = rootRef.id;
+
+  await db.collection('comments').add({
+    postId, authorId: 'replierR5', content: 'Réponse', replyToId: rootId,
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+
+  // Le commentaire racine notifie uniquement le propriétaire du post ;
+  // la réponse notifie l'auteur du parent (rootcommentR5) → +1.
+  await waitFor(async () => {
+    const snap = await db.doc('users/rootcommentR5').get();
+    return snap.data()?.notificationCount === 1;
+  });
+});
+
+// ------------------------------------------------------------
+// Dette P3 — users.reportCount (compteur « signalements reçus »)
+// Maintenu par les déclencheurs : +1 à la création d'un signalement
+// de commentaire/utilisateur (sur l'auteur de la cible), -1 défensif
+// à la suppression.
+// ------------------------------------------------------------
+test('RA1 onReportCreated : signalement de commentaire → users.reportCount de l’auteur +1', async () => {
+  await seedProfile('ownerA1', 'user');
+  await seedProfile('reporterA1', 'user');
+  const postRef = await seedPost('ownerA1');
+  const postId = postRef.id;
+
+  const commentRef = await db.collection('comments').add({
+    postId, authorId: 'ownerA1', content: 'Commentaire signalé', replyToId: '',
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+  const commentId = commentRef.id;
+
+  await db.collection('reports').doc(`reporterA1_comment_${commentId}`).set({
+    reporterId: 'reporterA1', reportId: `reporterA1_comment_${commentId}`,
+    targetType: 'comment', targetId: commentId, reason: 'hate', details: '', status: 'pending',
+    createdAt: T.createdAt,
+  });
+
+  await waitFor(async () => {
+    const snap = await db.doc('users/ownerA1').get();
+    return snap.data()?.reportCount === 1;
+  });
+});
+
+test('RA2 onReportCreated : signalement d’utilisateur → users.reportCount de la cible +1', async () => {
+  await seedProfile('targetA2', 'user');
+  await seedProfile('reporterA2', 'user');
+
+  await db.collection('reports').doc('reporterA2_user_targetA2').set({
+    reporterId: 'reporterA2', reportId: 'reporterA2_user_targetA2',
+    targetType: 'user', targetId: 'targetA2', reason: 'harassment', details: '', status: 'pending',
+    createdAt: T.createdAt,
+  });
+
+  await waitFor(async () => {
+    const snap = await db.doc('users/targetA2').get();
+    return snap.data()?.reportCount === 1;
+  });
+});
+
+test('RA3 onReportDeleted : suppression d’un signalement de commentaire → users.reportCount -1', async () => {
+  await seedProfile('ownerA3', 'user');
+  await seedProfile('reporterA3', 'user');
+  const postRef = await seedPost('ownerA3');
+  const postId = postRef.id;
+
+  const commentRef = await db.collection('comments').add({
+    postId, authorId: 'ownerA3', content: 'Cible', replyToId: '',
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+  const commentId = commentRef.id;
+
+  await db.collection('reports').doc(`reporterA3_comment_${commentId}`).set({
+    reporterId: 'reporterA3', reportId: `reporterA3_comment_${commentId}`,
+    targetType: 'comment', targetId: commentId, reason: 'spam', details: '', status: 'pending',
+    createdAt: T.createdAt,
+  });
+
+  await waitFor(async () => {
+    const snap = await db.doc('users/ownerA3').get();
+    return snap.data()?.reportCount === 1;
+  });
+
+  await db.collection('reports').doc(`reporterA3_comment_${commentId}`).delete();
+
+  await waitFor(async () => {
+    const snap = await db.doc('users/ownerA3').get();
+    return snap.data()?.reportCount === 0;
+  });
+});
+
+// ------------------------------------------------------------
+// Dette P2 — moderation des commentaires (moderateComment)
+// et résolution des signalements utilisateur à la sanction.
+// ------------------------------------------------------------
+test('D1 moderateComment (modérateur) : masquer un commentaire + résoudre les signalements + tracer', async () => {
+  const modUid = await createAuthUser('moderatorD1@parole.test');
+  await seedProfile(modUid, 'moderator');
+  await seedProfile('ownerD1', 'user');
+
+  const postRef = await seedPost('ownerD1');
+  const postId = postRef.id;
+  const commentRef = await db.collection('comments').add({
+    postId, authorId: 'ownerD1', content: 'Commentaire à masquer', replyToId: '',
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+  const commentId = commentRef.id;
+
+  await db.collection('reports').doc(`eve_comment_${commentId}`).set({
+    reporterId: 'eve', reportId: `eve_comment_${commentId}`,
+    targetType: 'comment', targetId: commentId, reason: 'hate', details: '', status: 'pending',
+    createdAt: T.createdAt,
+  });
+
+  const moderateComment = httpsCallable(functions, 'moderateComment');
+  const res = await callWithRetry(moderateComment, { commentId, action: 'mask', reason: 'Haineux' });
+  if (res.data.ok !== true || res.data.moderationStatus !== 'hidden') {
+    throw new Error(`Réponse inattendue : ${JSON.stringify(res.data)}`);
+  }
+
+  const comment = await commentRef.get();
+  if (comment.data()?.moderationStatus !== 'hidden') {
+    throw new Error('Le commentaire devrait être masqué (hidden).');
+  }
+
+  const report = await db.doc(`reports/eve_comment_${commentId}`).get();
+  if (report.data()?.status !== 'resolved') {
+    throw new Error('Le signalement devrait être résolu après la décision.');
+  }
+
+  await waitFor(async () => {
+    const snap = await db
+      .collection('auditLogs')
+      .where('targetId', '==', commentId)
+      .where('action', '==', 'comment.mask')
+      .get();
+    return snap.size > 0;
+  });
+
+  await signOut(auth);
+});
+
 test('D1b moderateComment (modérateur) : action remove produit bien removed', async () => {
   const modUid = await createAuthUser('moderatorD1b@parole.test');
   await seedProfile(modUid, 'moderator');
@@ -999,6 +1287,88 @@ test('D1b moderateComment (modérateur) : action remove produit bien removed', a
     return snap.size > 0;
   });
 
+  await signOut(auth);
+});
+
+test('D2 moderateComment (utilisateur simple) : REFUS', async () => {
+  const userUid = await createAuthUser('userD2@parole.test');
+  await seedProfile(userUid, 'user');
+  await seedProfile('ownerD2', 'user');
+  const postRef = await seedPost('ownerD2');
+  const postId = postRef.id;
+  const commentRef = await db.collection('comments').add({
+    postId, authorId: 'ownerD2', content: 'Commentaire', replyToId: '',
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+  const commentId = commentRef.id;
+
+  const moderateComment = httpsCallable(functions, 'moderateComment');
+  await expectCallableError(moderateComment({ commentId, action: 'mask', reason: 'x' }), 'permission-denied');
+
+  const data = (await commentRef.get()).data();
+  if (data.moderationStatus !== 'visible') {
+    throw new Error('Le commentaire ne devrait pas être modifié par un utilisateur simple.');
+  }
+  await signOut(auth);
+});
+
+test('D3 moderateComment : action inconnue REFUS', async () => {
+  const modUid = await createAuthUser('moderatorD3@parole.test');
+  await seedProfile(modUid, 'moderator');
+  await seedProfile('ownerD3', 'user');
+  const postRef = await seedPost('ownerD3');
+  const postId = postRef.id;
+  const commentRef = await db.collection('comments').add({
+    postId, authorId: 'ownerD3', content: 'Commentaire', replyToId: '',
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+  const commentId = commentRef.id;
+
+  const moderateComment = httpsCallable(functions, 'moderateComment');
+  await expectCallableError(moderateComment({ commentId, action: 'nuke', reason: 'x' }), 'invalid-argument');
+  await signOut(auth);
+});
+
+test('D4 moderateComment : commentaire inexistant REFUS (not-found)', async () => {
+  const modUid = await createAuthUser('moderatorD4@parole.test');
+  await seedProfile(modUid, 'moderator');
+  const moderateComment = httpsCallable(functions, 'moderateComment');
+  await expectCallableError(moderateComment({ commentId: 'ghost_comment', action: 'mask', reason: 'x' }), 'not-found');
+  await signOut(auth);
+});
+
+test('D5 sanctionUser (admin) : avertir un utilisateur résout ses signalements + clôt la file', async () => {
+  const adminUid = await createAuthUser('adminD5@parole.test');
+  await seedProfile(adminUid, 'admin');
+  await seedProfile('targetD5', 'user');
+
+  await db.collection('reports').doc('eve_user_targetD5').set({
+    reporterId: 'eve', reportId: 'eve_user_targetD5',
+    targetType: 'user', targetId: 'targetD5', reason: 'harassment', details: '', status: 'pending',
+    createdAt: T.createdAt,
+  });
+  await db.doc('moderationQueue/user_targetD5').set({
+    targetType: 'user', targetId: 'targetD5', status: 'pending', reportCount: 1,
+    firstReporterId: 'eve', lastReporterId: 'eve', reason: 'harassment',
+    createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+  // Garantir que onReportCreated a incrémenté users.reportCount.
+  await waitFor(async () => {
+    const snap = await db.doc('users/targetD5').get();
+    return snap.data()?.reportCount >= 1;
+  });
+
+  const sanctionUser = httpsCallable(functions, 'sanctionUser');
+  await callWithRetry(sanctionUser, { userId: 'targetD5', action: 'warn', reason: 'Harcèlement' });
+
+  const report = await db.doc('reports/eve_user_targetD5').get();
+  if (report.data()?.status !== 'resolved') {
+    throw new Error('Le signalement utilisateur devrait être résolu après le warn.');
+  }
+  const queue = await db.doc('moderationQueue/user_targetD5').get();
+  if (queue.data()?.status !== 'resolved') {
+    throw new Error('La file de modération utilisateur devrait être résolue.');
+  }
   await signOut(auth);
 });
 

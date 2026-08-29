@@ -213,6 +213,9 @@ async function seed() {
     await setDoc(doc(db, 'notifications', 'n_eve4'), notification('eve', 'dave', 'follow'));
     await setDoc(doc(db, 'notifications', 'n_eve5'), notification('eve', 'bob', 'like', { postId: 'post5' }));
     await setDoc(doc(db, 'notifications', 'n_read'), notification('eve', 'alice', 'like', { postId: 'post1', read: true, readAt: T.createdAt }));
+    // Notification de type 'reply' (dette P3 : notifications de réponse)
+    await setDoc(doc(db, 'notifications', 'n_reply'), notification('alice', 'bob', 'reply', { postId: 'post5', commentId: 'c_reply' }));
+
     // Commentaires « visibilité des commentaires modérés » : documents
     // seedés par la modération (statuts visibles/masqués/retirés) sur le
     // post public post1 (auteur alice, non-modérateur). Les tests
@@ -983,6 +986,73 @@ test('K8  Base : requête posts publics (sans contrainte authorId) OK', async ()
   if (!ids.includes('post1')) {
     throw new Error(`La requête posts publics devrait contenir post1 : ${ids.join(', ')}`);
   }
+});
+
+// ============================================================
+// L. Dette technique post-Phase 8 (P2/P3/P4)
+//   - Commentaire créé avec moderationStatus autres que 'visible'
+//     REFUS (durcissement de création, aligné sur les posts).
+//   - Signalements de type 'comment' et 'user' : création autorisée
+//     (les signalements de commentaires/utilisateurs doivent pouvoir
+//     être créés — la modération s'appuie dessus).
+//   - Notification de type 'reply' : lisible par le destinataire,
+//     champs épinglés (immuable comme toute notification), jamais
+//     modifiable par un client.
+// ============================================================
+test('L1  Créer un commentaire avec moderationStatus=hidden REFUS (durcissement)', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'comments', 'c_hidden'), {
+    postId: 'post1', authorId: 'eve', content: 'Commentaire masqué à la création',
+    replyToId: '', createdAt: T.createdAt, updatedAt: T.updatedAt,
+    moderationStatus: 'hidden', deletedAt: null,
+  }));
+});
+test('L2  Créer un commentaire avec moderationStatus=visible OK', async () => {
+  await expectAllowed(setDoc(doc(eve().firestore(), 'comments', 'c_vis'), {
+    postId: 'post1', authorId: 'eve', content: 'Commentaire visible à la création',
+    replyToId: '', createdAt: T.createdAt, updatedAt: T.updatedAt,
+    moderationStatus: 'visible', deletedAt: null,
+  }));
+});
+test('L3  Créer un signalement de type comment OK', async () => {
+  await expectAllowed(setDoc(doc(charlie().firestore(), 'reports', 'charlie_comment_c_vis'),
+    report('charlie', 'comment', 'c_vis')));
+});
+test('L4  Créer un signalement de type user OK', async () => {
+  await expectAllowed(setDoc(doc(charlie().firestore(), 'reports', 'charlie_user_alice'),
+    report('charlie', 'user', 'alice')));
+});
+test('L5  Un signalement de type user avec statut non pending REFUS', async () => {
+  await expectDenied(setDoc(doc(charlie().firestore(), 'reports', 'charlie_user_bob'),
+    report('charlie', 'user', 'bob', 'harassment', 'resolved')));
+});
+test('L6  Signalement de type comment avec targetType invalide REFUS', async () => {
+  await expectDenied(setDoc(doc(charlie().firestore(), 'reports', 'charlie_comment_post1'), {
+    ...report('charlie', 'comment', 'post1'), targetType: 'channel',
+  }));
+});
+test('L7  Notification de type reply : lisible par le destinataire OK', async () => {
+  await expectAllowed(getDoc(doc(alice().firestore(), 'notifications', 'n_reply')));
+});
+test('L8  Notification de type reply : lisible par un admin OK', async () => {
+  await expectAllowed(getDoc(doc(admin().firestore(), 'notifications', 'n_reply')));
+});
+test('L9  Notification de type reply : illisible par un tiers REFUS', async () => {
+  await expectDenied(getDoc(doc(eve().firestore(), 'notifications', 'n_reply')));
+});
+test('L10 Notification de type reply : un client ne modifie jamais le type REFUS', async () => {
+  await expectDenied(updateDoc(doc(alice().firestore(), 'notifications', 'n_reply'), { type: 'like' }));
+});
+test('L11 Notification de type reply : un client ne modifie jamais recipientId REFUS', async () => {
+  await expectDenied(updateDoc(doc(alice().firestore(), 'notifications', 'n_reply'), { recipientId: 'eve' }));
+});
+test('L12 Notification de type reply : un client ne peut pas la créer REFUS', async () => {
+  await expectDenied(setDoc(doc(alice().firestore(), 'notifications', 'n_cli'),
+    notification('alice', 'bob', 'reply', { postId: 'post5', commentId: 'c_x' })));
+});
+test('L13 Notification de type reply : marquage non lue -> lue OK', async () => {
+  await expectAllowed(updateDoc(doc(alice().firestore(), 'notifications', 'n_reply'), {
+    read: true, readAt: new Date(),
+  }));
 });
 
 // ============================================================
