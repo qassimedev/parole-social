@@ -4,6 +4,10 @@
 // Conforme aux règles Firestore (firestore.rules) :
 //  - Création : `hasOnly` exact — postId, authorId, content,
 //    replyToId, createdAt, updatedAt, moderationStatus, deletedAt.
+//    replyToId = '' pour un commentaire racine, sinon l'id du
+//    commentaire parent (réponse/thread). Le rendu en arbre est
+//    construit côté client (src/views/home.ts) ; aucune règle de
+//    sécurité supplémentaire n'est nécessaire.
 //    Le schéma commentaire ne dénormalise PAS authorName : le nom
 //    d'auteur est résolu côté client via users/{authorId}
 //    (lisible par tout utilisateur connecté).
@@ -36,6 +40,7 @@ export interface Comment {
   postId: string;
   authorId: string;
   content: string;
+  replyToId: string;
   moderationStatus: string;
   createdAt: Date | null;
   updatedAt: Date | null;
@@ -51,6 +56,7 @@ function snapshotToComment(snap: QueryDocumentSnapshot): Comment {
     postId: data.postId ?? '',
     authorId: data.authorId ?? '',
     content: data.content ?? '',
+    replyToId: data.replyToId ?? '',
     moderationStatus: data.moderationStatus ?? 'visible',
     createdAt: data.createdAt?.toDate?.() ?? null,
     updatedAt: data.updatedAt?.toDate?.() ?? null,
@@ -76,9 +82,16 @@ export async function fetchComments(postId: string): Promise<Comment[]> {
 
 // ------------------------------------------------------------
 // Création d'un commentaire texte par le client.
-// Champs strictement limités à ceux autorisés par firestore.rules.
+// `commentId` = id du commentaire parent pour une réponse (thread),
+// vide ('') pour un commentaire racine. Les champs sont strictement
+// limités à ceux autorisés par firestore.rules.
 // ------------------------------------------------------------
-export async function createComment(postId: string, uid: string, content: string): Promise<string> {
+export async function createComment(
+  postId: string,
+  uid: string,
+  content: string,
+  commentId = ''
+): Promise<string> {
   const trimmed = content.trim();
   if (trimmed.length === 0) throw new Error('Le commentaire ne peut pas être vide.');
   if (trimmed.length > 2000) throw new Error('2000 caractères maximum.');
@@ -87,7 +100,7 @@ export async function createComment(postId: string, uid: string, content: string
     postId,
     authorId: uid,
     content: trimmed,
-    replyToId: '',
+    replyToId: commentId,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     moderationStatus: 'visible',

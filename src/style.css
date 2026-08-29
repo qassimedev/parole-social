@@ -628,6 +628,154 @@ select.field__input {
 }
 
 /* ------------------------------------------------------------
+   Commentaires (threads) — Phase 8 réponses
+   ------------------------------------------------------------ */
+.comments {
+  margin-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 0.75rem;
+}
+
+.comments__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+}
+
+.comments__title {
+  font-size: 0.95rem;
+}
+
+.comments__count {
+  font-variant-numeric: tabular-nums;
+}
+
+.comments__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.comments__status {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--color-muted);
+  padding: 0.5rem 0;
+}
+
+.comments__empty {
+  padding: 0.5rem 0;
+}
+
+.comments__error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.comments__composer .field {
+  margin-bottom: 0.6rem;
+}
+
+.comments__composer .actions {
+  margin-top: 0;
+}
+
+.comment-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 0.5rem;
+  padding: 0.6rem 0.75rem;
+}
+
+.comment-card__header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.3rem;
+}
+
+.comment-card__meta {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.comment-card__author {
+  font-size: 0.85rem;
+}
+
+.comment-card__date {
+  font-size: 0.72rem;
+}
+
+.comment-card__badges {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.comment-card__content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.comment-card__actions {
+  display: flex;
+  margin-top: 0.4rem;
+}
+
+.comment-card__deleted {
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+/* Indentation du thread : 3 niveaux d'affichage max (0, 1, 2). */
+.comment-card--level-0 {
+  margin-left: 0;
+}
+
+.comment-card--level-1 {
+  margin-left: 1.1rem;
+}
+
+.comment-card--level-2 {
+  margin-left: 2.2rem;
+}
+
+.comment-card--deleted {
+  border-style: dashed;
+  background: transparent;
+  opacity: 0.85;
+}
+
+/* Composer de réponse inline (sous le commentaire ciblé). */
+.comment-reply {
+  margin-top: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border-left: 3px solid rgba(233, 69, 96, 0.5);
+  border-radius: 0 0.5rem 0.5rem 0;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.comment-reply .field {
+  margin-bottom: 0.5rem;
+}
+
+.comment-reply .actions {
+  margin-top: 0;
+}
+
+/* ------------------------------------------------------------
    Signalements (formulaire de signalement d'un contenu)
    ------------------------------------------------------------ */
 .report-panel {

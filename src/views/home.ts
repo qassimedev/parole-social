@@ -40,7 +40,12 @@ const MODERATION_LABELS: Record<string, string> = {
   removed: 'Retiré',
 };
 
-function commentMarkup(comment: Comment, authorName: string): string {
+// Carte d'un commentaire. `level` contrôle l'indentation du thread
+// (0 = racine, 1 = réponse, 2 = niveau max affiché ; au-delà aplati).
+// Chaque carte expose un bouton « Répondre » et un conteneur
+// `.comment-reply` dans lequel le composer de réponse est injecté à
+// la volée côté client (voir mountHome).
+function commentMarkup(comment: Comment, authorName: string, level: number): string {
   const date =
     comment.createdAt?.toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' }) ?? '—';
   const initial = escapeHtml((authorName || '?').trim().charAt(0).toUpperCase() || '?');
@@ -49,7 +54,8 @@ function commentMarkup(comment: Comment, authorName: string): string {
     ? `<span class="badge badge--warn">${escapeHtml(MODERATION_LABELS[comment.moderationStatus] ?? comment.moderationStatus)}</span>`
     : '';
   return `
-    <article class="comment-card">
+    <article class="comment-card comment-card--level-${Math.min(Math.max(level, 0), 2)}"
+      data-comment-id="${escapeHtml(comment.id)}">
       <header class="comment-card__header">
         <span class="avatar avatar--sm avatar--fallback" aria-hidden="true">${initial}</span>
         <div class="comment-card__meta">
@@ -59,12 +65,71 @@ function commentMarkup(comment: Comment, authorName: string): string {
         <div class="comment-card__badges">${moderationBadge}</div>
       </header>
       <p class="comment-card__content">${escapeHtml(comment.content)}</p>
+      <div class="comment-card__actions">
+        <button type="button" class="btn btn--ghost btn--sm comment-reply-toggle"
+          data-reply-to="${escapeHtml(comment.id)}"
+          aria-expanded="false">
+          <span class="btn__label">Répondre</span>
+        </button>
+      </div>
+      <div class="comment-reply" aria-live="polite"></div>
     </article>
   `;
 }
 
+// Placeholder affiché quand le parent d'une réponse est supprimé ou
+// introuvable parmi les commentaires chargés.
+function commentDeletedMarkup(level: number): string {
+  return `
+    <div class="comment-card comment-card--level-${Math.min(Math.max(level, 0), 2)} comment-card--deleted" role="note">
+      <span class="comment-card__deleted muted">Commentaire supprimé.</span>
+    </div>
+  `;
+}
+
+// Rendu en arbre des commentaires (thread) :
+//  - replyToId === '' → commentaire racine ;
+//  - sinon → réponse rendue sous son parent ;
+//  - 3 niveaux d'affichage maximum (0, 1, 2), au-delà aplatis sur 2 ;
+//  - parent supprimé/introuvable → placeholder « Commentaire supprimé ».
 function commentsListMarkup(comments: Comment[], authorNames: Map<string, string>): string {
-  return comments.map((c) => commentMarkup(c, authorNames.get(c.authorId) ?? c.authorId)).join('\n');
+  const ids = new Set(comments.map((c) => c.id));
+  const byParent = new Map<string, Comment[]>();
+  for (const comment of comments) {
+    const parentKey = comment.replyToId || '';
+    const siblings = byParent.get(parentKey);
+    if (siblings) siblings.push(comment);
+    else byParent.set(parentKey, [comment]);
+  }
+
+  const rendered = new Set<string>();
+  const renderSubtree = (comment: Comment, level: number): string => {
+    if (rendered.has(comment.id)) return '';
+    rendered.add(comment.id);
+    const card = commentMarkup(comment, authorNames.get(comment.authorId) ?? comment.authorId, level);
+    const replies = (byParent.get(comment.id) ?? [])
+      .map((child) => renderSubtree(child, Math.min(level + 1, 2)))
+      .join('\n');
+    return [card, replies].join('\n');
+  };
+
+  const parts: string[] = [];
+  for (const comment of comments) {
+    if (comment.replyToId === '') parts.push(renderSubtree(comment, 0));
+  }
+  // Réponses orphelines : parent supprimé ou absent du chargement.
+  for (const comment of comments) {
+    if (comment.replyToId !== '' && !ids.has(comment.replyToId) && !rendered.has(comment.id)) {
+      parts.push(commentDeletedMarkup(0));
+      parts.push(renderSubtree(comment, 1));
+    }
+  }
+  // Filet de sécurité : tout commentaire non encore rendu (cycle ou
+  // auto-référence dans replyToId) apparaît au minimum en racine.
+  for (const comment of comments) {
+    if (!rendered.has(comment.id)) parts.push(renderSubtree(comment, 0));
+  }
+  return parts.join('\n');
 }
 
 function commentsEmptyMarkup(): string {
@@ -98,6 +163,35 @@ function commentComposerMarkup(postId: string): string {
       <div class="actions">
         <button type="submit" class="btn btn--primary btn--sm">
           <span class="btn__label">Commenter</span>
+        </button>
+      </div>
+    </form>
+  `;
+}
+
+// Composer de réponse inline, injecté sous le commentaire ciblé
+// (le parent de la réponse = le commentaire `commentId`).
+function replyFormMarkup(postId: string, commentId: string): string {
+  const safePostId = escapeHtml(postId);
+  const safeCommentId = escapeHtml(commentId);
+  return `
+    <form class="comment-reply__form" data-post-id="${safePostId}" data-comment-id="${safeCommentId}" novalidate>
+      ${textareaMarkup({
+        id: `reply-content-${postId}-${commentId}`,
+        label: 'Répondre',
+        name: 'content',
+        rows: 2,
+        maxlength: 2000,
+        placeholder: 'Votre réponse…',
+        hint: '1 à 2000 caractères.',
+      })}
+      <div class="comment-reply__alerts"></div>
+      <div class="actions">
+        <button type="submit" class="btn btn--primary btn--sm">
+          <span class="btn__label">Répondre</span>
+        </button>
+        <button type="button" class="btn btn--ghost btn--sm comment-reply__cancel">
+          <span class="btn__label">Annuler</span>
         </button>
       </div>
     </form>
@@ -498,15 +592,17 @@ export function mountHome(root: HTMLElement, ctx: ViewContext): void {
   });
 
   const attachCommentsHandlers = (container: HTMLElement): void => {
-    const commentForms = container.querySelectorAll<HTMLFormElement>('.comment-form');
-    commentForms.forEach((commentForm) => {
-      const postId = commentForm.dataset.postId;
+    const commentsSections = container.querySelectorAll<HTMLElement>('.comments');
+    commentsSections.forEach((section) => {
+      const postId = section.dataset.postId;
       if (!postId) return;
 
-      const commentsSection = commentForm.closest('.comments');
-      const listEl = commentsSection?.querySelector<HTMLDivElement>('.comments__list');
-      const countEl = commentsSection?.querySelector<HTMLSpanElement>('.comments__count');
-      const alertsEl = commentsSection?.querySelector<HTMLDivElement>(`#comment-alerts-${postId}`);
+      const commentForm = section.querySelector<HTMLFormElement>('.comment-form');
+      const listEl = section.querySelector<HTMLDivElement>('.comments__list');
+      const countEl = section.querySelector<HTMLSpanElement>('.comments__count');
+      const alertsEl = commentForm
+        ? section.querySelector<HTMLDivElement>(`#comment-alerts-${postId}`)
+        : null;
 
       const loadComments = async (): Promise<void> => {
         if (!listEl) return;
@@ -525,7 +621,7 @@ export function mountHome(root: HTMLElement, ctx: ViewContext): void {
         }
       };
 
-      commentForm.addEventListener('submit', async (event) => {
+      commentForm?.addEventListener('submit', async (event) => {
         event.preventDefault();
         if (!alertsEl) return;
         alertsEl.innerHTML = '';
@@ -551,6 +647,91 @@ export function mountHome(root: HTMLElement, ctx: ViewContext): void {
           alertsEl.innerHTML = alertMarkup(describeError(err), 'error');
         } finally {
           setSubmitting(commentForm, false);
+        }
+      });
+
+      // Composer de réponse : un seul actif par section. Délégation
+      // d'événements car la liste est re-rendue à chaque chargement.
+      const clearCommentReply = (el: HTMLElement | null | undefined): void => {
+        const replyHost = el?.querySelector<HTMLElement>('.comment-reply');
+        if (replyHost) replyHost.innerHTML = '';
+      };
+
+      const syncReplyExpand = (): void => {
+        section.querySelectorAll<HTMLButtonElement>('.comment-reply-toggle').forEach((btn) => {
+          const hasForm = btn
+            .closest<HTMLElement>('.comment-card')
+            ?.querySelector<HTMLFormElement>('.comment-reply__form') != null;
+          btn.setAttribute('aria-expanded', String(hasForm));
+        });
+      };
+
+      section.addEventListener('click', (event) => {
+        const target = event.target as HTMLElement;
+
+        const cancel = target.closest<HTMLButtonElement>('.comment-reply__cancel');
+        if (cancel) {
+          clearCommentReply(cancel.closest<HTMLElement>('.comment-card'));
+          syncReplyExpand();
+          return;
+        }
+
+        const toggle = target.closest<HTMLButtonElement>('.comment-reply-toggle');
+        if (!toggle) return;
+        const card = toggle.closest<HTMLElement>('.comment-card');
+        const commentId = card?.dataset.commentId;
+        const replyHost = card?.querySelector<HTMLElement>('.comment-reply');
+        if (!commentId || !replyHost) return;
+
+        const openForm = section.querySelector<HTMLFormElement>('.comment-reply__form');
+        if (openForm) {
+          const openHost = openForm.closest<HTMLElement>('.comment-card');
+          // Même carte déjà ouverte → bascule (fermeture).
+          if (openHost === card) {
+            clearCommentReply(openHost);
+            syncReplyExpand();
+            return;
+          }
+          clearCommentReply(openHost);
+        }
+
+        replyHost.innerHTML = replyFormMarkup(postId, commentId);
+        replyHost.querySelector<HTMLTextAreaElement>('textarea')?.focus();
+        syncReplyExpand();
+      });
+
+      section.addEventListener('submit', async (event) => {
+        const replyForm = (event.target as HTMLElement).closest<HTMLFormElement>('.comment-reply__form');
+        if (!replyForm) return;
+        event.preventDefault();
+
+        const commentId = replyForm.dataset.commentId;
+        const card = replyForm.closest<HTMLElement>('.comment-card');
+        const replyAlerts = replyForm.querySelector<HTMLDivElement>('.comment-reply__alerts');
+        if (!commentId || !replyAlerts) return;
+        replyAlerts.innerHTML = '';
+
+        const contentEl = replyForm.elements.namedItem('content') as HTMLTextAreaElement;
+        const content = contentEl.value;
+
+        let message: string | null = null;
+        if (!content.trim()) message = 'La réponse ne peut pas être vide.';
+        else if (content.trim().length > 2000) message = '2000 caractères maximum.';
+        if (message) {
+          replyAlerts.innerHTML = alertMarkup(message, 'error');
+          return;
+        }
+
+        setSubmitting(replyForm, true);
+        try {
+          await createComment(postId, uid, content, commentId);
+          clearCommentReply(card);
+          syncReplyExpand();
+          await loadComments();
+        } catch (err) {
+          replyAlerts.innerHTML = alertMarkup(describeError(err), 'error');
+        } finally {
+          setSubmitting(replyForm, false);
         }
       });
 
