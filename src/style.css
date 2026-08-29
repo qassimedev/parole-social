@@ -500,7 +500,41 @@ select.field__input {
 }
 
 .post-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
   margin-top: 0.5rem;
+}
+
+.like-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.like-toggle__icon {
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--color-muted);
+  transition: color 0.15s ease, transform 0.15s ease;
+}
+
+.like-toggle:hover:not(:disabled) .like-toggle__icon {
+  color: var(--color-accent);
+}
+
+.like-toggle__count {
+  font-variant-numeric: tabular-nums;
+}
+
+.like-toggle--active {
+  border-color: rgba(233, 69, 96, 0.5);
+}
+
+.like-toggle--active .like-toggle__icon {
+  color: var(--color-accent);
+  transform: scale(1.15);
 }
 
 /* ------------------------------------------------------------

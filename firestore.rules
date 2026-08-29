@@ -212,6 +212,41 @@ service cloud.firestore {
     }
 
     // ----------------------------------------------------------
+    // likes/{likeId}
+    // Un like par utilisateur et par post : DÉDUPLICATION par ID
+    // déterministe `likeId = ${userId}_${postId}` (imposé par la
+    // règle de création). Un second like est un setDoc sur un
+    // document existant -> UPDATE -> refusé. Le retrait d'un like
+    // est une suppression réservée à son auteur.
+    // Les compteurs (posts.likeCount et users.likeCount des likes
+    // reçus) sont maintenus par les Cloud Functions
+    // (onLikeCreated / onLikeDeleted) — jamais par un client.
+    // ----------------------------------------------------------
+    match /likes/{likeId} {
+      allow read: if isSignedIn();
+
+      allow create: if canAct()
+        && request.resource.data.userId == request.auth.uid
+        && likeId == request.auth.uid + '_' + request.resource.data.postId
+        && 'postId' in request.resource.data
+        && request.resource.data.postId is string
+        && request.resource.data.postId.size() > 0
+        && isPostReadable(request.resource.data.postId)
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.keys().hasOnly([
+          'userId', 'postId', 'createdAt', 'updatedAt'
+        ]);
+
+      // Un like est immuable : on like ou on retire, jamais de
+      // modification.
+      allow update: if false;
+
+      // Retrait d'un like : uniquement son auteur.
+      allow delete: if isOwner(resource.data.userId);
+    }
+
+    // ----------------------------------------------------------
     // reports/{reportId}
     // DÉDUPLICATION : reportId = `${reporterId}_${targetType}_${targetId}`.
     // Un même utilisateur ne peut donc créer qu'UN signalement par
@@ -290,13 +325,10 @@ service cloud.firestore {
 
     // ----------------------------------------------------------
     // Collections prévues pour les phases suivantes (DENY BY DEFAULT
-    // jusqu'à implémentation) : follows, likes, appeals, messages,
+    // jusqu'à implémentation) : follows, appeals, messages,
     // hashtags, creatorStats.
     // ----------------------------------------------------------
     match /follows/{docId} {
-      allow read, write: if false;
-    }
-    match /likes/{docId} {
       allow read, write: if false;
     }
     match /appeals/{docId} {

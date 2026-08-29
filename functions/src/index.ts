@@ -6,7 +6,7 @@ import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import * as logger from 'firebase-functions/logger';
 
 // ============================================================
-// PAROLE - Cloud Functions (Phase 1 + Phase 2)
+// PAROLE - Cloud Functions (Phase 1 + Phase 2 + Phase 3)
 //
 // Phase 1 : les données sensibles (role, banned, statuts de
 // modération, compteurs système, résolutions de signalements,
@@ -19,6 +19,10 @@ import * as logger from 'firebase-functions/logger';
 // créations abusives, création de l'utilisateur Auth et du profil
 // Firestore conforme aux règles (rôle `user`, non banni, compteurs
 // à zéro, champs strictement limités).
+//
+// Phase 3 : `onLikeCreated` / `onLikeDeleted` maintiennent les
+// compteurs de likes (`posts.likeCount` et `users.likeCount` des
+// likes reçus) à chaque création/suppression d'un like.
 // ============================================================
 
 initializeApp();
@@ -454,6 +458,68 @@ export const onCommentDeleted = onDocumentDeleted('comments/{commentId}', async 
   if (postId) {
     await db.doc(`posts/${postId}`).update({ commentCount: FieldValue.increment(-1) });
   }
+});
+
+// ------------------------------------------------------------
+// Compteurs de likes
+// onLikeCreated  : +1 posts/{postId}.likeCount et +1
+//                  users/{auteur}.likeCount (likes reçus).
+// onLikeDeleted  : décréments symétriques.
+// Le client ne peut JAMAIS écrire ces compteurs : seule l'existence
+// du like (création/suppression, encadrée par les règles Firestore)
+// déclenche la mise à jour via l'Admin SDK. Si l'auteur du post n'a
+// pas de profil, on met simplement à jour le post (défensif).
+// ------------------------------------------------------------
+export const onLikeCreated = onDocumentCreated('likes/{likeId}', async (event) => {
+  const postId = event.data?.data()?.postId as string | undefined;
+  if (!postId) {
+    return;
+  }
+
+  const postSnap = await db.doc(`posts/${postId}`).get();
+  if (!postSnap.exists) {
+    return;
+  }
+  const authorId = postSnap.data()?.authorId as string | undefined;
+
+  const batch = db.batch();
+  batch.update(postSnap.ref, { likeCount: FieldValue.increment(1) });
+
+  if (authorId) {
+    const userSnap = await db.doc(`users/${authorId}`).get();
+    if (userSnap.exists) {
+      batch.update(userSnap.ref, { likeCount: FieldValue.increment(1) });
+    }
+  }
+
+  await batch.commit();
+  logger.info(`Like registered on post ${postId}`);
+});
+
+export const onLikeDeleted = onDocumentDeleted('likes/{likeId}', async (event) => {
+  const postId = event.data?.data()?.postId as string | undefined;
+  if (!postId) {
+    return;
+  }
+
+  const postSnap = await db.doc(`posts/${postId}`).get();
+  if (!postSnap.exists) {
+    return;
+  }
+  const authorId = postSnap.data()?.authorId as string | undefined;
+
+  const batch = db.batch();
+  batch.update(postSnap.ref, { likeCount: FieldValue.increment(-1) });
+
+  if (authorId) {
+    const userSnap = await db.doc(`users/${authorId}`).get();
+    if (userSnap.exists) {
+      batch.update(userSnap.ref, { likeCount: FieldValue.increment(-1) });
+    }
+  }
+
+  await batch.commit();
+  logger.info(`Like removed from post ${postId}`);
 });
 
 // ------------------------------------------------------------

@@ -1,5 +1,5 @@
 // ============================================================
-// PAROLE - Suite de tests de sécurité (Phase 1)
+// PAROLE - Suite de tests de sécurité (Phase 1 + Phase 3)
 // Exécution : npm run test:rules
 //   -> firebase emulators:exec --only firestore,storage "node scripts/test-rules.mjs"
 //
@@ -8,11 +8,14 @@
 // manipulations de role/banned/reportCount/likeCount/commentCount/
 // status de modération/auditLogs, et les scénarios explicites de
 // la Phase 1 (aucune suppression automatique par signalement).
+// Phase 3 : bloc G (likes) — déduplication par identifiant
+// déterministe, visibilité du post cible, immuabilité, like/retrait
+// par le propriétaire, requête « mes likes ».
 // ============================================================
 
 import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
-import { setDoc, doc, getDoc, updateDoc, deleteDoc, getDocs, query, where } from 'firebase/firestore';
+import { setDoc, doc, getDoc, updateDoc, deleteDoc, getDocs, query, where, collection } from 'firebase/firestore';
 import { ref, uploadBytes, getBytes, deleteObject } from 'firebase/storage';
 
 const projectId = 'parole-social';
@@ -97,6 +100,10 @@ function post(authorId, authorName, visibility, moderationStatus = 'visible', ex
 function report(reporterId, targetType, targetId, reason = 'harassment', status = 'pending') {
   const reportId = `${reporterId}_${targetType}_${targetId}`;
   return { reporterId, reportId, targetType, targetId, reason, details: '', status, createdAt: T.createdAt };
+}
+
+function like(userId, postId, extra = {}) {
+  return { userId, postId, createdAt: T.createdAt, updatedAt: T.createdAt, ...extra };
 }
 
 const SEED_USERS = ['alice', 'bob', 'eve', 'charlie', 'dave', 'mod', 'admin'];
@@ -512,6 +519,74 @@ test('F13 Storage : suppression de son avatar OK', async () => {
 });
 test('F14 Storage : suppression de l’avatar d’un autre REFUS', async () => {
   await expectDenied(deleteObject(ref(eve().storage(), 'media/bob/avatars/profile.png')));
+});
+
+// ============================================================
+// G. Likes
+// Déduplication par ID déterministe `${userId}_${postId}`.
+// Compteurs maintenus par les Cloud Functions (jamais par un client).
+// ============================================================
+test('G1  Non-auth : création de like REFUS', async () => {
+  await expectDenied(setDoc(doc(anon().firestore(), 'likes', 'anon_post6'), like('anon', 'post6')));
+});
+test('G2  Non-auth : lecture d’un like REFUS', async () => {
+  await expectDenied(getDoc(doc(anon().firestore(), 'likes', 'eve_post5')));
+});
+test('G3  Like sur un post public OK', async () => {
+  await expectAllowed(setDoc(doc(eve().firestore(), 'likes', 'eve_post5'), like('eve', 'post5')));
+});
+test('G4  Like sur un post masqué REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'likes', 'eve_post4'), like('eve', 'post4')));
+});
+test('G5  Like sur un post followers (non suiveur) REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'likes', 'eve_post2'), like('eve', 'post2')));
+});
+test('G6  Like sur un post privé d’autrui REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'likes', 'eve_post3'), like('eve', 'post3')));
+});
+test('G7  Like avec un ID de document incohérent REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'likes', 'wrong_post5'), like('eve', 'post5')));
+});
+test('G8  Like avec userId tiers REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'likes', 'bob_post5'), like('bob', 'post5')));
+});
+test('G9  Like sur un post inexistant REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'likes', 'eve_ghost'), like('eve', 'ghost')));
+});
+test('G10 Like dupliqué (même cible) REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'likes', 'eve_post5'), like('eve', 'post5')));
+});
+test('G11 Modification d’un like REFUS (immuable)', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'likes', 'eve_post5'), { updatedAt: new Date() }));
+});
+test('G12 Un like est lisible par les autres utilisateurs connectés OK', async () => {
+  await expectAllowed(getDoc(doc(alice().firestore(), 'likes', 'eve_post5')));
+});
+test('G13 Requête « mes likes » (where userId) OK', async () => {
+  const snap = await getDocs(
+    query(collection(eve().firestore(), 'likes'), where('userId', '==', 'eve'))
+  );
+  const ids = snap.docs.map((d) => d.id);
+  if (!ids.includes('eve_post5')) {
+    throw new Error(`La requête « mes likes » devrait contenir eve_post5 : ${ids.join(', ')}`);
+  }
+});
+test('G14 Like avec un champ supplémentaire REFUS (hasOnly)', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'likes', 'eve_post1'), like('eve', 'post1', { extra: true })));
+});
+test('G15 L’auteur peut aimer son propre post privé OK', async () => {
+  await expectAllowed(setDoc(doc(alice().firestore(), 'likes', 'alice_post3'), like('alice', 'post3')));
+});
+test('G16 Suppression du like d’un autre REFUS', async () => {
+  await expectAllowed(setDoc(doc(charlie().firestore(), 'likes', 'charlie_post6'), like('charlie', 'post6')));
+  await expectDenied(deleteDoc(doc(eve().firestore(), 'likes', 'charlie_post6')));
+});
+test('G17 L’auteur supprime son propre like OK', async () => {
+  await expectAllowed(deleteDoc(doc(eve().firestore(), 'likes', 'eve_post5')));
+});
+test('G18 Utilisateur banni ne peut pas liker', async () => {
+  const banned = () => testEnv.authenticatedContext('banned1');
+  await expectDenied(setDoc(doc(banned().firestore(), 'likes', 'banned1_post1'), like('banned1', 'post1')));
 });
 
 // ============================================================

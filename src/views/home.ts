@@ -1,6 +1,8 @@
 import { describeError } from '../lib/errors';
+import { notify } from '../lib/notify';
 import { createTextPost, fetchFeed, type Post, type PostVisibility } from '../lib/posts';
 import { createComment, fetchComments, fetchAuthorNames, type Comment } from '../lib/comments';
+import { fetchLikedPostIds, toggleLike } from '../lib/likes';
 import {
   createReport,
   hasReported,
@@ -152,17 +154,24 @@ function postMarkup(post: Post, uid: string): string {
       ? `<span class="badge badge--warn">${escapeHtml(MODERATION_LABELS[post.moderationStatus] ?? post.moderationStatus)}</span>`
       : '';
   const isOwn = post.authorId === uid;
-  const reportControls = isOwn
+  const reportButton = isOwn
     ? ''
     : `
-    <div class="post-card__actions">
       <button type="button" class="btn btn--ghost btn--sm report-toggle"
         data-report-toggle="${escapeHtml(post.id)}"
         aria-expanded="false" aria-controls="report-panel-${escapeHtml(post.id)}">
         <span class="btn__label">Signaler</span>
       </button>
-    </div>
-    ${reportPanelMarkup(post.id)}
+    `;
+  const likeButton = `
+    <button type="button" class="btn btn--ghost btn--sm like-toggle"
+      data-like-toggle="${escapeHtml(post.id)}"
+      data-liked="false"
+      aria-pressed="false"
+      aria-label="Aimer ou retirer votre j’aime de cette publication">
+      <span class="like-toggle__icon" aria-hidden="true">♥</span>
+      <span class="like-toggle__count" aria-label="Nombre de j’aime">${Number(post.likeCount) || 0}</span>
+    </button>
   `;
   return `
     <article class="post-card">
@@ -175,7 +184,11 @@ function postMarkup(post: Post, uid: string): string {
         <div class="post-card__badges">${visibilityBadge}${moderationBadge}</div>
       </header>
       <p class="post-card__content">${escapeHtml(post.content)}</p>
-      ${reportControls}
+      <div class="post-card__actions">
+        ${likeButton}
+        ${reportButton}
+      </div>
+      ${isOwn ? '' : reportPanelMarkup(post.id)}
       ${commentsSectionMarkup(post.id)}
     </article>
   `;
@@ -296,6 +309,54 @@ export function mountHome(root: HTMLElement, ctx: ViewContext): void {
   if (!uid) return;
   const authorName = session.profile?.displayName || session.displayName || uid;
 
+  let likedPostIds = new Set<string>();
+
+  const setLiked = (btn: HTMLButtonElement, liked: boolean): void => {
+    btn.dataset.liked = String(liked);
+    btn.setAttribute('aria-pressed', String(liked));
+    btn.classList.toggle('like-toggle--active', liked);
+  };
+
+  const applyLikedState = (container: HTMLElement): void => {
+    container.querySelectorAll<HTMLButtonElement>('.like-toggle').forEach((btn) => {
+      const postId = btn.dataset.likeToggle;
+      setLiked(btn, Boolean(postId && likedPostIds.has(postId)));
+    });
+  };
+
+  const attachLikeHandlers = (container: HTMLElement): void => {
+    container.querySelectorAll<HTMLButtonElement>('.like-toggle').forEach((btn) => {
+      const postId = btn.dataset.likeToggle;
+      if (!postId) return;
+
+      btn.addEventListener('click', async () => {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        const wasLiked = btn.dataset.liked === 'true';
+        const countEl = btn.querySelector<HTMLSpanElement>('.like-toggle__count');
+        const currentCount = countEl ? Number(countEl.textContent ?? '0') : 0;
+        const nextLiked = !wasLiked;
+
+        // Mise à jour optimiste : l'état réel reste garanti par les
+        // règles (doublon = update refusé, suppression = propriétaire).
+        setLiked(btn, nextLiked);
+        if (countEl) countEl.textContent = String(Math.max(0, currentCount + (nextLiked ? 1 : -1)));
+
+        try {
+          await toggleLike(uid, postId);
+          if (nextLiked) likedPostIds.add(postId);
+          else likedPostIds.delete(postId);
+        } catch (err) {
+          setLiked(btn, wasLiked);
+          if (countEl) countEl.textContent = String(currentCount);
+          notify(describeError(err), 'error');
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+  };
+
   const form = root.querySelector<HTMLFormElement>('#post-form');
   const feed = root.querySelector<HTMLDivElement>('#post-feed');
   const alerts = root.querySelector<HTMLDivElement>('#post-alerts');
@@ -308,6 +369,13 @@ export function mountHome(root: HTMLElement, ctx: ViewContext): void {
     try {
       const posts = await fetchFeed(uid);
       feed.innerHTML = posts.length === 0 ? emptyMarkup() : listMarkup(posts, uid);
+      try {
+        likedPostIds = await fetchLikedPostIds(uid);
+      } catch {
+        likedPostIds = new Set();
+      }
+      applyLikedState(feed);
+      attachLikeHandlers(feed);
       attachCommentsHandlers(root);
       attachReportHandlers(root);
     } catch (err) {

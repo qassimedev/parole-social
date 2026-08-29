@@ -27,6 +27,10 @@ avec une décision traçable et susceptible d'appel.
   (nom affiché, bio, photo), interface SPA complète pour ces parcours
   (accueil, connexion, inscription, vérification email, mot de passe oublié,
   profil, paramètres).
+- **Phase 3** (validée) : likes — déduplication par identifiant déterministe
+  (`likeId = ${userId}_${postId}`), compteurs `posts.likeCount` et
+  `users.likeCount` (likes reçus) maintenus par les Cloud Functions, bouton
+  j'aime avec état actif et mise à jour optimiste dans le fil.
 
 ---
 
@@ -51,9 +55,10 @@ avec une décision traçable et susceptible d'appel.
 ┌─────────────────────────────┐   ┌─────────────────────────────┐
 │ Firestore                   │   │ Cloud Functions (Admin SDK) │
 │ • users, posts, comments    │──▶│ • moderatePost              │
-│ • reports (dédupliqués)     │   │ • sanctionUser              │
-│ • moderationQueue           │   │ • onReportCreated (cnt)     │
-│ • notifications, auditLogs  │   │ • onCommentCreated/Deleted  │
+│ • likes (dédupliqués)       │   │ • sanctionUser              │
+│ • reports (dédupliqués)     │   │ • onReportCreated (cnt)     │
+│ • moderationQueue           │   │ • onCommentCreated/Deleted  │
+│ • notifications, auditLogs  │   │ • onLikeCreated/Deleted(cnt)│
 │ Index composites minimaux   │   │ Écrit auditLogs (traçable)  │
 └─────────────────────────────┘   └─────────────────────────────┘
         │ accès authentifié
@@ -103,6 +108,18 @@ Comme les posts : lecture conditionnée à la lisibilité du post parent,
 création si le post est lisible, modification du contenu par l'auteur,
 suppression par l'auteur. `postId`/`authorId`/`moderationStatus` immuables côté client.
 
+### likes/{likeId}
+- **Déduplication** : `likeId = ${userId}_${postId}` — un utilisateur ne peut
+  aimer un post qu'une seule fois (un second `setDoc` devient un `update`,
+  refusé). Un like est **immuable** (pas de modification).
+- Champs : `userId`, `postId`, `createdAt`, `updatedAt`. Aucune donnée sensible.
+- Lecture : tout utilisateur connecté (permet la requête « mes likes » sur
+  `userId`, index mono-champ — aucun index composite requis).
+- Création : connecté, profil présent, non banni, et le post cible doit être
+  lisible (`isPostReadable`). Retrait : suppression réservée à son auteur.
+- Compteurs `posts.likeCount` et `users.likeCount` (likes reçus) : maintenus
+  par `onLikeCreated` / `onLikeDeleted` — jamais écrits par un client.
+
 ### reports/{reportId}
 - **Déduplication** : `reportId = ${reporterId}_${targetType}_${targetId}`.
   Un même utilisateur ne peut créer **qu'un seul** signalement par cible
@@ -132,7 +149,7 @@ Journal append-only des actions administratives et de modération.
 - Lecture : **administrateurs uniquement**.
 
 ### Collections prévues pour les phases suivantes
-`follows`, `likes`, `appeals`, `messages`, `hashtags`, `creatorStats` sont
+`follows`, `appeals`, `messages`, `hashtags`, `creatorStats` sont
 déclarées en **deny-by-default** (aucun accès) jusqu'à leur implémentation.
 
 ## Rôles et permissions
@@ -140,6 +157,7 @@ déclarées en **deny-by-default** (aucun accès) jusqu'à leur implémentation.
 | Capacité | user | moderator | admin |
 |---|---|---|---|
 | Créer son profil / posts / commentaires / signalements | ✔ | ✔ | ✔ |
+| Liker / retirer son like | ✔ | ✔ | ✔ |
 | Modifier/supprimer ses propres contenus | ✔ | ✔ | ✔ |
 | Lire les posts publics | ✔ | ✔ | ✔ |
 | Lire les posts masqués | ✖ (sauf auteur) | ✔ | ✔ |
@@ -175,6 +193,8 @@ modération, les compteurs système, les décisions de modération, les
 | `onReportCreated` | trigger | — | incrémente `post.reportCount`, crée/met à jour la file de modération |
 | `onCommentCreated` | trigger | — | incrémente `post.commentCount` |
 | `onCommentDeleted` | trigger | — | décrémente `post.commentCount` |
+| `onLikeCreated` (Phase 3) | trigger | — | incrémente `post.likeCount` et `users.likeCount` (likes reçus) |
+| `onLikeDeleted` (Phase 3) | trigger | — | décrémente `post.likeCount` et `users.likeCount` (likes reçus) |
 | `healthcheck` | HTTP | — | état du service |
 
 ## Index Firestore
@@ -208,8 +228,8 @@ Ouvrir l'UI des émulateurs : http://localhost:4000
 npm run typecheck      # vérification TypeScript (frontend)
 npm run build          # build frontend
 npm run build:functions
-npm run test:rules     # tests de sécurité Firestore + Storage (96 tests, émulateurs)
-npm run test:functions # tests des Cloud Functions (12 tests, émulateurs)
+npm run test:rules     # tests de sécurité Firestore + Storage (114 tests, émulateurs)
+npm run test:functions # tests des Cloud Functions (14 tests, émulateurs)
 npm run test:all       # tout
 ```
 
@@ -251,5 +271,5 @@ firebase.json         # Configuration émulateurs / hosting
 ## Roadmap
 
 La construction est progressive : architecture et sécurité (Phase 1), puis
-authentification, base de données, interface, publications, interactions,
-signalements, modération, notifications, déploiement.
+authentification, base de données, interface, publications, interactions
+(likes), signalements, modération, notifications, déploiement.

@@ -8,6 +8,8 @@
 //     + création/alimentation de la moderationQueue.
 //   - Déclencheurs onCommentCreated / onCommentDeleted : maintien
 //     de post.commentCount.
+//   - Déclencheurs onLikeCreated / onLikeDeleted (Phase 3) :
+//     maintien de posts.likeCount et users.likeCount (likes reçus).
 //   - Callable moderatePost : masquer/rétablir/maintenir/retirer un
 //     post, résoudre les signalements, tracer dans auditLogs.
 //   - Callable sanctionUser : warn/ban/unban/setRole + auditLogs.
@@ -255,6 +257,73 @@ test('T3  onCommentDeleted : commentCount décrémenté', async () => {
   await waitFor(async () => {
     const snap = await postRef.get();
     return snap.data()?.commentCount === 0;
+  });
+});
+
+// ------------------------------------------------------------
+// Likes (Phase 3)
+// ------------------------------------------------------------
+test('T4  onLikeCreated : posts.likeCount + users.likeCount (likes reçus) incrémentés', async () => {
+  await seedProfile('liker', 'user');
+  await seedProfile('author1', 'user');
+
+  const postRef = await seedPost('author1');
+  const postId = postRef.id;
+
+  await db.collection('likes').doc(`liker_${postId}`).set({
+    userId: 'liker',
+    postId,
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+
+  const post = await waitFor(async () => {
+    const snap = await postRef.get();
+    return snap.data()?.likeCount === 1 ? snap.data() : null;
+  });
+  if (post.likeCount !== 1) {
+    throw new Error(`posts.likeCount attendu = 1, obtenu ${post.likeCount}`);
+  }
+
+  await waitFor(async () => {
+    const snap = await db.doc('users/author1').get();
+    return snap.data()?.likeCount === 1;
+  });
+});
+
+test('T5  onLikeDeleted : posts.likeCount + users.likeCount décrémentés', async () => {
+  await seedProfile('unliker', 'user');
+  await seedProfile('author2', 'user');
+
+  const postRef = await seedPost('author2');
+  const postId = postRef.id;
+  const likeRef = db.collection('likes').doc(`unliker_${postId}`);
+
+  await likeRef.set({
+    userId: 'unliker',
+    postId,
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+
+  await waitFor(async () => {
+    const snap = await postRef.get();
+    return snap.data()?.likeCount === 1;
+  });
+  await waitFor(async () => {
+    const snap = await db.doc('users/author2').get();
+    return snap.data()?.likeCount === 1;
+  });
+
+  await likeRef.delete();
+
+  await waitFor(async () => {
+    const snap = await postRef.get();
+    return snap.data()?.likeCount === 0;
+  });
+  await waitFor(async () => {
+    const snap = await db.doc('users/author2').get();
+    return snap.data()?.likeCount === 0;
   });
 });
 
