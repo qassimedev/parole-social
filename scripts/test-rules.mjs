@@ -23,6 +23,9 @@
 // déterministe, cible lisible, immuabilité, retrait réservé au shareur,
 // requête « mes partages », compteur posts.shareCount jamais modifiable
 // par un client, aucun compteur users.shareCount.
+// Phase 7 : bloc K (fil d'abonnés) — lecture des posts visibility='followers'
+// par un abonné OK, non-abonné refusé, auteur/modérateur/admin OK, et
+// requête collection followers sans fuite de données.
 // ============================================================
 
 import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
@@ -870,6 +873,91 @@ test('J19 Un client ne peut pas modifier posts.shareCount REFUS', async () => {
 });
 test('J20 Un client ne peut pas modifier users.shareCount (champ inexistant) REFUS', async () => {
   await expectDenied(updateDoc(doc(eve().firestore(), 'users', 'eve'), { shareCount: 5 }));
+});
+
+// ============================================================
+// K. Lecture des posts visibility='followers' (Phase 7 - fil d'abonnés)
+// Le fil « Abonnés » repose sur la règle existsante followsAuthor()
+// (firestore.rules) : un post 'followers' ne peut être lu que par un
+// abonné à son auteur, par son auteur, ou par un modérateur/admin.
+//
+// IMPORTANT (contrainte du moteur de règles) : la règle de lecture
+// d'un post (`isPostDataReadable`) déréférence `authorId` (via
+// followsAuthor pour les posts 'followers'), `moderationStatus` et
+// `visibility`. Pour une requête de collection à lecture non
+// court-circuitée, le moteur exige que la requête soit contrainte sur
+// CHACUN de ces champs (une requête `where visibility == 'followers'`
+// seule est rejetée : « Property authorId is undefined » ; puis
+// « Property moderationStatus is undefined »). L'application interroge
+// donc `where authorId in [moi, ...suivis]` + `moderationStatus ==
+// 'visible'` + `visibility in ['public','followers']` : requête valide
+// (index composite posts authorId/moderationStatus/visibility), les
+// règles filtrant ensuite chaque document.
+//
+// Ces tests reproduisent exactement cette requête de l'application
+// (contrainte authorId + moderationStatus + visibility) et verrouillent
+// l'absence de tout leak.
+// Données exploitées : post2 = post 'followers' d'alice.
+// ============================================================
+test('K1  Lecture d’un post followers par un abonné OK', async () => {
+  // dave suit alice (suivi créé via une règle, pas seed antérieur).
+  await expectAllowed(setDoc(doc(dave().firestore(), 'follows', 'dave_alice'), follow('dave', 'alice')));
+  await expectAllowed(getDoc(doc(dave().firestore(), 'posts', 'post2')));
+});
+test('K2  Lecture d’un post followers par un non-abonné REFUS', async () => {
+  await expectDenied(getDoc(doc(eve().firestore(), 'posts', 'post2')));
+});
+test('K3  L’auteur lit son propre post followers OK', async () => {
+  await expectAllowed(getDoc(doc(alice().firestore(), 'posts', 'post2')));
+});
+test('K4  Un modérateur lit un post followers OK', async () => {
+  await expectAllowed(getDoc(doc(mod().firestore(), 'posts', 'post2')));
+});
+test('K5  Un administrateur lit un post followers OK', async () => {
+  await expectAllowed(getDoc(doc(admin().firestore(), 'posts', 'post2')));
+});
+test('K6  Requête « fil abonnés » d’un abonné (authorId in [suivi]) : post followers OK', async () => {
+  // dave suit alice : il interroge exactement comme l'application
+  // (authorId in [suivi] + moderationStatus + visibility). post2
+  // (followers) doit remonter.
+  const snap = await getDocs(
+    query(
+      collection(dave().firestore(), 'posts'),
+      where('authorId', 'in', ['alice']),
+      where('moderationStatus', '==', 'visible'),
+      where('visibility', 'in', ['public', 'followers'])
+    )
+  );
+  const ids = snap.docs.map((d) => d.id);
+  if (!ids.includes('post2')) {
+    throw new Error(`Un abonné devrait voir post2 dans sa requête de fil : ${ids.join(', ')}`);
+  }
+});
+test('K7  Requête « fil abonnés » d’un non-abonné (authorId in [suivi]) : aucun leak', async () => {
+  // eve ne suit pas alice. En sémantique Firestore de requête de
+  // collection, la règle de lecture s'applique à CHAQUE document
+  // renvoyé : le jeu candidat contient post2 (followers, illisible par
+  // eve), donc la REQUÊTE ENTIÈRE est refusée — aucun document (même
+  // post1, public) ne fuit.
+  await expectDenied(
+    getDocs(
+      query(
+        collection(eve().firestore(), 'posts'),
+        where('authorId', 'in', ['alice']),
+        where('moderationStatus', '==', 'visible'),
+        where('visibility', 'in', ['public', 'followers'])
+      )
+    )
+  );
+});
+test('K8  Base : requête posts publics (sans contrainte authorId) OK', async () => {
+  const snap = await getDocs(
+    query(collection(eve().firestore(), 'posts'), where('visibility', '==', 'public'), where('moderationStatus', '==', 'visible'))
+  );
+  const ids = snap.docs.map((d) => d.id);
+  if (!ids.includes('post1')) {
+    throw new Error(`La requête posts publics devrait contenir post1 : ${ids.join(', ')}`);
+  }
 });
 
 // ============================================================

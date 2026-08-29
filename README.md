@@ -45,13 +45,25 @@ avec une décision traçable et susceptible d'appel.
   navigation alimenté exclusivement par `users.notificationCount`, marquage
   individuel ou global comme lu, règles strictes (lecture destinataire/admin,
   notification déjà lue immuable).
-- **Phase 6** (en cours) : partage / renvoi — collection `shares`
+- **Phase 6** (validée) : partage / renvoi — collection `shares`
   (déduplication par identifiant déterministe `shareId = ${userId}_${postId}`,
   documents immuables), compteur `posts.shareCount` maintenu par les Cloud
   Functions (`onShareCreated` / `onShareDeleted`), **aucun compteur
   `users.shareCount`**, notification de type `share` au propriétaire du post
   partagé (jamais pour soi-même), bouton Partager / Partagé avec état optimiste
   dans le fil (miroir du like), compteur affiché sur les profils publics.
+- **Phase 7** (en cours) : fil d'abonnés — deux modes de fil dans l'accueil :
+  *Général* (posts publics + mes posts) et *Abonnés* (posts publics + posts
+  `visibility='followers'` des utilisateurs suivis + mes posts). La visibilité
+  des posts `followers` reste **exclusivement** tranchée par les règles
+  Firestore (`followsAuthor` / `isPostDataReadable`). Le fil *Abonnés* interroge
+  `where authorId in [moi, ...suivis]` + `moderationStatus == 'visible'` +
+  `visibility in ['public','followers']` : la règle de lecture déréférence
+  `authorId`, `moderationStatus` et `visibility`, donc le moteur de règles
+  exige une requête de collection contrainte sur ces trois champs. Cette
+  requête nécessite l'index composite `posts (authorId, moderationStatus,
+  visibility)` (ajouté dans `firestore.indexes.json`). Aucune Cloud Function
+  ajoutée ; `fetchFollowingIds` est réutilisé pour borner la requête.
 
 ---
 
@@ -332,8 +344,16 @@ Index composites minimaux (Phase 1), uniquement ceux réellement utilisés :
 La collection `shares` (Phase 6) n'ajoute **aucun index composite** : ses
 requêtes (« mes partages ») sont des `where userId` mono-champ.
 
-Les index nécessaires aux phases suivantes (flux, etc.) seront ajoutés au fil
-de l'eau — pas par anticipation.
+La Phase 7 (fil d'abonnés) ajoute **un** index composite, réellement requis :
+`posts (authorId ASC, moderationStatus ASC, visibility ASC)`, pour la requête du
+fil *Abonnés* (`authorId in [moi, ...suivis]` + `moderationStatus == 'visible'`
++ `visibility in ['public','followers']`) — contrainte exigée par le moteur de
+règles (la règle de lecture déréférence ces trois champs). Le fil *Général*
+repose toujours sur l'index existant `posts [visibility ASC, moderationStatus
+ASC]`, et la requête « mes posts » est mono-champ (`authorId`).
+
+Les index nécessaires aux phases suivantes seront ajoutés au fil de l'eau —
+pas par anticipation.
 
 ## Commandes
 

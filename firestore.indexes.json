@@ -9,6 +9,15 @@
       ]
     },
     {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "authorId", "order": "ASC" },
+        { "fieldPath": "moderationStatus", "order": "ASC" },
+        { "fieldPath": "visibility", "order": "ASC" }
+      ]
+    },
+    {
       "collectionGroup": "reports",
       "queryScope": "COLLECTION",
       "fields": [

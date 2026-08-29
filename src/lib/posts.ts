@@ -8,8 +8,15 @@
 //    'visible') — le client ne choisit jamais ces valeurs.
 //  - Feed : requêtes de collection contraintes sur les champs
 //    exacts de la règle de lecture (visibility + moderationStatus,
-//    ou authorId). Les posts 'followers' restent hors feed tant
-//    que la collection `follows` n'existe pas (deny-by-default).
+//    ou authorId).
+//  - Phase 7 : deux modes de fil.
+//      * 'general'   : posts 'public' + mes propres posts.
+//      * 'following' : posts 'public' + posts 'followers' des
+//        personnes suivies + mes propres posts. La requête est
+//        contrainte sur `authorId` (obligatoire pour la règle de
+//        lecture des posts 'followers', qui appelle followsAuthor),
+//        et la visibilité est TOUJOURS tranchée par les règles
+//        Firestore : jamais de décision de visibilité côté client.
 // ============================================================
 
 import { getFirestoreInstance } from './firebase';
@@ -22,8 +29,11 @@ import {
   query,
   serverTimestamp,
   where,
+  type Query,
   type QueryDocumentSnapshot,
 } from 'firebase/firestore';
+
+import { fetchFollowingIds } from './follows';
 
 export type PostVisibility = 'public' | 'followers' | 'private';
 export type PostType = 'text' | 'image' | 'video' | 'audio';
@@ -68,29 +78,101 @@ function snapshotToPost(snap: QueryDocumentSnapshot): Post {
 }
 
 // ------------------------------------------------------------
+// Mode de fil : "general" (posts publics + mes posts) ou
+// "following" (posts publics + posts 'followers' des personnes que
+// je suis + mes posts). Les deux modes n'ajoutent AUCUN index
+// composite : les requêtes sur visibility + moderationStatus sont
+// couvertes par l'index existant [visibility ASC, moderationStatus
+// ASC], et la requête « mes posts » est mono-champ (authorId).
+// ------------------------------------------------------------
+export type FeedMode = 'general' | 'following';
+
+// ------------------------------------------------------------
 // Feed : posts publics + mes propres posts, fusionnés et triés
 // du plus récent au plus ancien. Les posts "supprimés" (deletedAt)
 // sont exclus.
+//
+// Mode 'following' : posts 'public' + posts 'followers' des
+// personnes suivies + mes propres posts, en réutilisant
+// fetchFollowingIds(uid) pour borner le jeu à mes abonnements.
+//
+// IMPORTANT (règles Firestore) : la règle de lecture d'un post
+// (`isPostDataReadable`) appelle `followsAuthor(data.authorId)` pour
+// les posts 'followers' et déréférence aussi `data.moderationStatus`
+// et `data.visibility`. Le moteur de règles exige qu'une requête de
+// collection sur les posts soit contrainte sur CHAQUE champ
+// déréférencé (authorId, moderationStatus, visibility). Le mode
+// 'following' contraint donc la requête avec `authorId in [moi,
+// ...suivis]` + `moderationStatus == 'visible'` + `visibility in
+// ['public','followers']` — ce qui requiert l'index composite posts
+// (authorId ASC, moderationStatus ASC, visibility ASC). Les règles
+// filtrent ensuite chaque document (un post 'followers' d'un auteur
+// non suivi, ou privé d'autrui, est invisible).
 // ------------------------------------------------------------
-export async function fetchFeed(uid: string): Promise<Post[]> {
-  const publicQ = query(
-    collection(db, 'posts'),
-    where('visibility', '==', 'public'),
-    where('moderationStatus', '==', 'visible')
-  );
-  const ownQ = query(collection(db, 'posts'), where('authorId', '==', uid));
+export async function fetchFeed(uid: string, mode: FeedMode = 'general'): Promise<Post[]> {
+  let followingIds: Set<string> = new Set();
+  if (mode === 'following') {
+    followingIds = await fetchFollowingIds(uid);
+  }
 
-  const [publicSnap, ownSnap] = await Promise.all([getDocs(publicQ), getDocs(ownQ)]);
+  const [feedSnap, ownSnap] = await Promise.all([
+    getDocs(buildFeedQuery(uid, mode, followingIds)),
+    getDocs(query(collection(db, 'posts'), where('authorId', '==', uid))),
+  ]);
 
   const byId = new Map<string, Post>();
-  for (const snap of [...publicSnap.docs, ...ownSnap.docs]) {
-    const post = snapshotToPost(snap);
+  for (const docSnap of [...feedSnap.docs, ...ownSnap.docs]) {
+    const post = snapshotToPost(docSnap);
     if (post.deletedAt) continue;
+
+    // En mode 'following', on borne l'affichage : mes propres posts
+    // (toutes visibilités), les posts 'public', et les posts
+    // 'followers' des utilisateurs suivis. Les posts 'private' d'autrui
+    // sont exclus (de toute façon invisibles via les règles). Strict :
+    // ne restreint que ce que les règles autorisent, ne les contourne
+    // jamais.
+    if (mode === 'following') {
+      if (post.authorId !== uid && post.visibility === 'private') continue;
+      if (post.visibility === 'followers' && post.authorId !== uid && !followingIds.has(post.authorId)) {
+        continue;
+      }
+    }
+
     if (!byId.has(post.id)) byId.set(post.id, post);
   }
 
   return [...byId.values()].sort(
     (a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0)
+  );
+}
+
+// Requête sous-jacente du fil publié. Le mode 'general' interroge les
+// posts 'public' visibles (visibility + moderationStatus contraints,
+// la règle court-circuite sur `visibility == 'public'`). Le mode
+// 'following' interroge les posts 'public'/'followers' des personnes
+// suivies et de moi-même : le moteur de règles exige que la requête
+// de collection soit contrainte sur CHAQUE champ déréférencé par la
+// règle de lecture (authorId via followsAuthor, moderationStatus,
+// visibility) — d'où la contrainte complète authorId + visibility +
+// moderationStatus. Cette requête compose trois champs et requiert
+// l'index composite posts (authorId ASC, moderationStatus ASC,
+// visibility ASC). Les règles restent l'autorité finale : chaque
+// document est ensuite filtré par l'affichage défensif.
+function buildFeedQuery(uid: string, mode: FeedMode, followingIds: Set<string>): Query {
+  if (mode === 'following') {
+    const scopes = new Set(followingIds);
+    scopes.add(uid);
+    return query(
+      collection(db, 'posts'),
+      where('authorId', 'in', [...scopes]),
+      where('moderationStatus', '==', 'visible'),
+      where('visibility', 'in', ['public', 'followers'])
+    );
+  }
+  return query(
+    collection(db, 'posts'),
+    where('visibility', '==', 'public'),
+    where('moderationStatus', '==', 'visible')
   );
 }
 

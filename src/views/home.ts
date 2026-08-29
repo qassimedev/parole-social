@@ -1,6 +1,12 @@
 import { describeError } from '../lib/errors';
 import { notify } from '../lib/notify';
-import { createTextPost, fetchFeed, type Post, type PostVisibility } from '../lib/posts';
+import {
+  createTextPost,
+  fetchFeed,
+  type FeedMode,
+  type Post,
+  type PostVisibility,
+} from '../lib/posts';
 import { createComment, fetchComments, fetchAuthorNames, type Comment } from '../lib/comments';
 import { fetchLikedPostIds, toggleLike } from '../lib/likes';
 import { fetchSharedPostIds, toggleShare } from '../lib/shares';
@@ -251,6 +257,16 @@ function feedMarkup(): string {
   return `
     <section class="card">
       <h2 class="card__title">Fil de publications</h2>
+      <div class="feed-tabs" role="tablist" aria-label="Type de fil">
+        <button type="button" class="feed-tab feed-tab--active" data-feed-tab="general"
+          role="tab" aria-selected="true" aria-controls="post-feed">
+          <span class="btn__label">Général</span>
+        </button>
+        <button type="button" class="feed-tab" data-feed-tab="following"
+          role="tab" aria-selected="false" aria-controls="post-feed">
+          <span class="btn__label">Abonnés</span>
+        </button>
+      </div>
       <div id="post-feed" class="post-feed" aria-live="polite">
         <div class="post-feed__status">${spinnerMarkup()}<span class="muted">Chargement des publications…</span></div>
       </div>
@@ -258,10 +274,14 @@ function feedMarkup(): string {
   `;
 }
 
-function emptyMarkup(): string {
+function emptyMarkup(mode: FeedMode): string {
+  const message =
+    mode === 'following'
+      ? 'Aucune publication pour le moment. Suivez d’autres voix ou partagez votre parole pour alimenter ce fil.'
+      : 'Aucune publication pour le moment. Soyez la première voix à se faire entendre !';
   return `
     <div class="post-feed__empty">
-      <p class="muted">Aucune publication pour le moment. Soyez la première voix à se faire entendre !</p>
+      <p class="muted">${escapeHtml(message)}</p>
     </div>
   `;
 }
@@ -424,14 +444,27 @@ export function mountHome(root: HTMLElement, ctx: ViewContext): void {
   const feed = root.querySelector<HTMLDivElement>('#post-feed');
   const alerts = root.querySelector<HTMLDivElement>('#post-alerts');
 
-  const loadFeed = async (): Promise<void> => {
+  let activeFeedMode: FeedMode = 'general';
+
+  const setActiveTab = (mode: FeedMode): void => {
+    const tabs = root.querySelectorAll<HTMLButtonElement>('.feed-tab');
+    tabs.forEach((tab) => {
+      const active = tab.dataset.feedTab === mode;
+      tab.classList.toggle('feed-tab--active', active);
+      tab.setAttribute('aria-selected', String(active));
+    });
+  };
+
+  const loadFeed = async (mode: FeedMode = activeFeedMode): Promise<void> => {
     if (!feed) return;
+    activeFeedMode = mode;
+    setActiveTab(mode);
     feed.innerHTML = `
       <div class="post-feed__status">${spinnerMarkup()}<span class="muted">Chargement des publications…</span></div>
     `;
     try {
-      const posts = await fetchFeed(uid);
-      feed.innerHTML = posts.length === 0 ? emptyMarkup() : listMarkup(posts, uid);
+      const posts = await fetchFeed(uid, mode);
+      feed.innerHTML = posts.length === 0 ? emptyMarkup(mode) : listMarkup(posts, uid);
       try {
         likedPostIds = await fetchLikedPostIds(uid);
       } catch {
@@ -451,10 +484,18 @@ export function mountHome(root: HTMLElement, ctx: ViewContext): void {
     } catch (err) {
       feed.innerHTML = errorMarkup(describeError(err));
       feed.querySelector<HTMLButtonElement>('#post-feed-retry')?.addEventListener('click', () => {
-        void loadFeed();
+        void loadFeed(mode);
       });
     }
   };
+
+  root.querySelectorAll<HTMLButtonElement>('.feed-tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const mode = tab.dataset.feedTab as FeedMode | undefined;
+      if (!mode || mode === activeFeedMode) return;
+      void loadFeed(mode);
+    });
+  });
 
   const attachCommentsHandlers = (container: HTMLElement): void => {
     const commentForms = container.querySelectorAll<HTMLFormElement>('.comment-form');
