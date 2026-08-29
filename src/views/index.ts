@@ -17,6 +17,7 @@ import { renderHome, mountHome } from './home';
 import { renderProfile, mountProfile } from './profile';
 import { renderSettings, mountSettings } from './settings';
 import { renderModeration, mountModeration } from './moderation';
+import { renderUser, mountUser } from './user';
 
 export function splashView(): string {
   return `
@@ -94,6 +95,10 @@ export function renderView(root: HTMLElement): void {
     case 'profile':
       root.innerHTML = renderProfile(ctx);
       mountProfile(root, ctx);
+      return;
+    case 'user':
+      root.innerHTML = renderUser(ctx);
+      mountUser(root, ctx);
       return;
     case 'settings':
       root.innerHTML = renderSettings(ctx);

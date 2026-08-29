@@ -46,7 +46,7 @@ function commentMarkup(comment: Comment, authorName: string): string {
       <header class="comment-card__header">
         <span class="avatar avatar--sm avatar--fallback" aria-hidden="true">${initial}</span>
         <div class="comment-card__meta">
-          <strong class="comment-card__author">${escapeHtml(authorName)}</strong>
+          <a class="comment-card__author" href="#/u/${escapeHtml(comment.authorId)}">${escapeHtml(authorName)}</a>
           <span class="comment-card__date muted">${escapeHtml(date)}</span>
         </div>
         <div class="comment-card__badges">${moderationBadge}</div>
@@ -178,7 +178,7 @@ function postMarkup(post: Post, uid: string): string {
       <header class="post-card__header">
         <span class="avatar avatar--sm avatar--fallback" aria-hidden="true">${initial}</span>
         <div class="post-card__meta">
-          <strong class="post-card__author">${escapeHtml(post.authorName)}</strong>
+          <a class="post-card__author" href="#/u/${escapeHtml(post.authorId)}">${escapeHtml(post.authorName)}</a>
           <span class="post-card__date muted">${escapeHtml(date)}</span>
         </div>
         <div class="post-card__badges">${visibilityBadge}${moderationBadge}</div>

@@ -93,6 +93,22 @@ export async function fetchFeed(uid: string): Promise<Post[]> {
 }
 
 // ------------------------------------------------------------
+// Posts d'un auteur (lecture via authorId, mono-champ — la règle de
+// lecture reste l'autorité : un post non lisible n'est pas renvoyé).
+// Filtre côté client : supprimés exclus, masqués exclus (sauf pour
+// les modérateurs qui les lisent — ici on n'affiche que les posts
+// visibles, cohérent avec le fil).
+// ------------------------------------------------------------
+export async function fetchPostsByAuthor(authorId: string): Promise<Post[]> {
+  const q = query(collection(db, 'posts'), where('authorId', '==', authorId));
+  const snap = await getDocs(q);
+  return snap.docs
+    .map(snapshotToPost)
+    .filter((p) => !p.deletedAt && p.moderationStatus === 'visible')
+    .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+}
+
+// ------------------------------------------------------------
 // Un post (lecture directe). Les modérateurs peuvent lire tous les
 // posts ; les autres ne peuvent lire que les posts qui leur sont
 // lisibles (la règle décide). Renvoie null si introuvable.

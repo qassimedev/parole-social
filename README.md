@@ -31,6 +31,12 @@ avec une décision traçable et susceptible d'appel.
   (`likeId = ${userId}_${postId}`), compteurs `posts.likeCount` et
   `users.likeCount` (likes reçus) maintenus par les Cloud Functions, bouton
   j'aime avec état actif et mise à jour optimiste dans le fil.
+- **Phase 4** (validée) : follow / abonnements — déduplication par identifiant
+  déterministe (`followId = ${followerId}_${followingId}`), compteurs
+  `users.followingCount` (suiveur) et `users.followerCount` (suivi) maintenus
+  par les Cloud Functions, self-follow interdit, cible requise et non bannie,
+  follow immuable, profil public (`#/u/{userId}`) avec bouton Suivre / Ne plus
+  suivre (état optimiste).
 
 ---
 
@@ -56,10 +62,12 @@ avec une décision traçable et susceptible d'appel.
 │ Firestore                   │   │ Cloud Functions (Admin SDK) │
 │ • users, posts, comments    │──▶│ • moderatePost              │
 │ • likes (dédupliqués)       │   │ • sanctionUser              │
-│ • reports (dédupliqués)     │   │ • onReportCreated (cnt)     │
-│ • moderationQueue           │   │ • onCommentCreated/Deleted  │
-│ • notifications, auditLogs  │   │ • onLikeCreated/Deleted(cnt)│
-│ Index composites minimaux   │   │ Écrit auditLogs (traçable)  │
+│ • follows (dédupliqués)     │   │ • onReportCreated (cnt)     │
+│ • reports (dédupliqués)     │   │ • onCommentCreated/Deleted  │
+│ • moderationQueue           │   │ • onLikeCreated/Deleted(cnt)│
+│ • notifications, auditLogs  │   │ • onFollowCreated/Deleted   │
+│ Index composites minimaux   │   │   (cnt abonnements)         │
+│                             │   │ Écrit auditLogs (traçable)  │
 └─────────────────────────────┘   └─────────────────────────────┘
         │ accès authentifié
         ▼
@@ -84,7 +92,7 @@ directement ces données.
 | uid, displayName, bio, avatarPath | string | propriétaire |
 | role (`user`/`moderator`/`admin`) | string | **jamais un client** (Functions) |
 | banned, bannedUntil, moderationStatus | bool/timestamp/string | **jamais un client** (Functions) |
-| postCount, reportCount, likeCount | number | **jamais un client** (compteurs système) |
+| postCount, reportCount, likeCount, followerCount, followingCount | number | **jamais un client** (compteurs système) |
 
 Lecture : tout utilisateur authentifié. Création : son propre profil uniquement
 (rôle forcé à `user`). Mise à jour : champs de profil uniquement
@@ -120,6 +128,24 @@ suppression par l'auteur. `postId`/`authorId`/`moderationStatus` immuables côt�
 - Compteurs `posts.likeCount` et `users.likeCount` (likes reçus) : maintenus
   par `onLikeCreated` / `onLikeDeleted` — jamais écrits par un client.
 
+### follows/{followId}
+- **Déduplication** : `followId = ${followerId}_${followingId}` — un utilisateur
+  ne peut suivre une personne qu'une seule fois (un second `setDoc` devient un
+  `update`, refusé). Un follow est **immuable** (pas de modification).
+- Champs : `followerId`, `followingId`, `createdAt`, `updatedAt`. Aucune donnée
+  sensible.
+- Lecture : le follower, le suivi, ou modérateur/admin (empêche d'énumérer les
+  abonnements d'autrui). Les requêtes « mes suivis » (`followerId == moi`) et
+  « mes abonnés » (`followingId == moi`) sont mono-champ — aucun index composite.
+  La visibilité des posts `followers` ne dépend pas de ce droit de lecture :
+  `exists()` reste autorisé dans les règles.
+- Création : connecté, profil présent, non banni (`canAct()`), la cible doit
+  **exister**, ne pas être **bannie**, et ne doit pas être **soi-même**.
+- Retrait : suppression réservée au follower.
+- Compteurs `users.followingCount` (suiveur) et `users.followerCount` (suivi) :
+  maintenus par `onFollowCreated` / `onFollowDeleted` — jamais écrits par un
+  client.
+
 ### reports/{reportId}
 - **Déduplication** : `reportId = ${reporterId}_${targetType}_${targetId}`.
   Un même utilisateur ne peut créer **qu'un seul** signalement par cible
@@ -149,8 +175,8 @@ Journal append-only des actions administratives et de modération.
 - Lecture : **administrateurs uniquement**.
 
 ### Collections prévues pour les phases suivantes
-`follows`, `appeals`, `messages`, `hashtags`, `creatorStats` sont
-déclarées en **deny-by-default** (aucun accès) jusqu'à leur implémentation.
+`appeals`, `messages`, `hashtags`, `creatorStats` sont déclarées en
+**deny-by-default** (aucun accès) jusqu'à leur implémentation.
 
 ## Rôles et permissions
 
@@ -158,6 +184,7 @@ déclarées en **deny-by-default** (aucun accès) jusqu'à leur implémentation.
 |---|---|---|---|
 | Créer son profil / posts / commentaires / signalements | ✔ | ✔ | ✔ |
 | Liker / retirer son like | ✔ | ✔ | ✔ |
+| Suivre / ne plus suivre un utilisateur | ✔ | ✔ | ✔ |
 | Modifier/supprimer ses propres contenus | ✔ | ✔ | ✔ |
 | Lire les posts publics | ✔ | ✔ | ✔ |
 | Lire les posts masqués | ✖ (sauf auteur) | ✔ | ✔ |
@@ -183,7 +210,7 @@ modération, les compteurs système, les décisions de modération, les
 - Lecture des médias de posts conditionnée à la visibilité du post Firestore
   (`firestore.get` / `firestore.exists`) : un post masqué = médias illisibles.
 
-## Cloud Functions (Phase 1 + Phase 2)
+## Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4)
 
 | Fonction | Type | Rôle requis | Effet |
 |---|---|---|---|
@@ -195,6 +222,8 @@ modération, les compteurs système, les décisions de modération, les
 | `onCommentDeleted` | trigger | — | décrémente `post.commentCount` |
 | `onLikeCreated` (Phase 3) | trigger | — | incrémente `post.likeCount` et `users.likeCount` (likes reçus) |
 | `onLikeDeleted` (Phase 3) | trigger | — | décrémente `post.likeCount` et `users.likeCount` (likes reçus) |
+| `onFollowCreated` (Phase 4) | trigger | — | incrémente `users.followingCount` (suiveur) et `users.followerCount` (suivi) |
+| `onFollowDeleted` (Phase 4) | trigger | — | décrémente `users.followingCount` (suiveur) et `users.followerCount` (suivi) |
 | `healthcheck` | HTTP | — | état du service |
 
 ## Index Firestore
@@ -228,8 +257,8 @@ Ouvrir l'UI des émulateurs : http://localhost:4000
 npm run typecheck      # vérification TypeScript (frontend)
 npm run build          # build frontend
 npm run build:functions
-npm run test:rules     # tests de sécurité Firestore + Storage (114 tests, émulateurs)
-npm run test:functions # tests des Cloud Functions (14 tests, émulateurs)
+npm run test:rules     # tests de sécurité Firestore + Storage (136 tests, émulateurs)
+npm run test:functions # tests des Cloud Functions (16 tests, émulateurs)
 npm run test:all       # tout
 ```
 
@@ -272,4 +301,4 @@ firebase.json         # Configuration émulateurs / hosting
 
 La construction est progressive : architecture et sécurité (Phase 1), puis
 authentification, base de données, interface, publications, interactions
-(likes), signalements, modération, notifications, déploiement.
+(likes, suivis), signalements, modération, notifications, déploiement.

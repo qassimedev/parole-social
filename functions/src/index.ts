@@ -6,7 +6,7 @@ import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import * as logger from 'firebase-functions/logger';
 
 // ============================================================
-// PAROLE - Cloud Functions (Phase 1 + Phase 2 + Phase 3)
+// PAROLE - Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4)
 //
 // Phase 1 : les données sensibles (role, banned, statuts de
 // modération, compteurs système, résolutions de signalements,
@@ -23,6 +23,11 @@ import * as logger from 'firebase-functions/logger';
 // Phase 3 : `onLikeCreated` / `onLikeDeleted` maintiennent les
 // compteurs de likes (`posts.likeCount` et `users.likeCount` des
 // likes reçus) à chaque création/suppression d'un like.
+//
+// Phase 4 : `onFollowCreated` / `onFollowDeleted` maintiennent les
+// compteurs d'abonnements (`users.followingCount` du suiveur et
+// `users.followerCount` du suivi) à chaque création/suppression d'un
+// follow.
 // ============================================================
 
 initializeApp();
@@ -202,6 +207,8 @@ export const registerUser = onCall(
       postCount: 0,
       reportCount: 0,
       likeCount: 0,
+      followerCount: 0,
+      followingCount: 0,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -520,6 +527,75 @@ export const onLikeDeleted = onDocumentDeleted('likes/{likeId}', async (event) =
 
   await batch.commit();
   logger.info(`Like removed from post ${postId}`);
+});
+
+// ------------------------------------------------------------
+// Compteurs d'abonnements (Phase 4)
+// onFollowCreated : +1 users/{suiveur}.followingCount et +1
+//                   users/{suivi}.followerCount.
+// onFollowDeleted : décréments symétriques.
+// Le client ne peut JAMAIS écrire ces compteurs : seule l'existence
+// du follow (création/suppression, encadrée par les règles Firestore
+// — ID déterministe, immuable, pas de self-follow) déclenche la mise
+// à jour via l'Admin SDK. Si un profil manque, on met simplement à
+// jour l'autre (défensif).
+// ------------------------------------------------------------
+export const onFollowCreated = onDocumentCreated('follows/{followId}', async (event) => {
+  const data = event.data?.data();
+  const followerId = data?.followerId as string | undefined;
+  const followingId = data?.followingId as string | undefined;
+  if (!followerId || !followingId) {
+    return;
+  }
+
+  const batch = db.batch();
+  let dirty = false;
+
+  const followerSnap = await db.doc(`users/${followerId}`).get();
+  if (followerSnap.exists) {
+    batch.update(followerSnap.ref, { followingCount: FieldValue.increment(1) });
+    dirty = true;
+  }
+
+  const followingSnap = await db.doc(`users/${followingId}`).get();
+  if (followingSnap.exists) {
+    batch.update(followingSnap.ref, { followerCount: FieldValue.increment(1) });
+    dirty = true;
+  }
+
+  if (dirty) {
+    await batch.commit();
+  }
+  logger.info(`Follow registered: ${followerId} -> ${followingId}`);
+});
+
+export const onFollowDeleted = onDocumentDeleted('follows/{followId}', async (event) => {
+  const data = event.data?.data();
+  const followerId = data?.followerId as string | undefined;
+  const followingId = data?.followingId as string | undefined;
+  if (!followerId || !followingId) {
+    return;
+  }
+
+  const batch = db.batch();
+  let dirty = false;
+
+  const followerSnap = await db.doc(`users/${followerId}`).get();
+  if (followerSnap.exists) {
+    batch.update(followerSnap.ref, { followingCount: FieldValue.increment(-1) });
+    dirty = true;
+  }
+
+  const followingSnap = await db.doc(`users/${followingId}`).get();
+  if (followingSnap.exists) {
+    batch.update(followingSnap.ref, { followerCount: FieldValue.increment(-1) });
+    dirty = true;
+  }
+
+  if (dirty) {
+    await batch.commit();
+  }
+  logger.info(`Follow removed: ${followerId} -> ${followingId}`);
 });
 
 // ------------------------------------------------------------

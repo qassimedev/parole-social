@@ -133,6 +133,8 @@ function viewModeMarkup(ctx: ViewContext): string {
       <dt>Adresse email</dt><dd>${escapeHtml(session.email ?? '—')}</dd>
       <dt>Rôle</dt><dd>${escapeHtml(profile.role)}</dd>
       <dt>Statut du compte</dt><dd>${profile.banned ? 'Banni' : profile.moderationStatus === 'none' ? 'Actif' : escapeHtml(profile.moderationStatus)}</dd>
+      <dt>Abonnements</dt><dd><span id="profile-following-count">${Number(profile.followingCount) || 0}</span></dd>
+      <dt>Abonnés</dt><dd><span id="profile-follower-count">${Number(profile.followerCount) || 0}</span></dd>
     </dl>
     ${publicInfoMarkup(profile)}
     <div class="actions">

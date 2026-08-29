@@ -10,6 +10,9 @@
 //     de post.commentCount.
 //   - Déclencheurs onLikeCreated / onLikeDeleted (Phase 3) :
 //     maintien de posts.likeCount et users.likeCount (likes reçus).
+//   - Déclencheurs onFollowCreated / onFollowDeleted (Phase 4) :
+//     maintien de users.followingCount (suiveur) et
+//     users.followerCount (suivi).
 //   - Callable moderatePost : masquer/rétablir/maintenir/retirer un
 //     post, résoudre les signalements, tracer dans auditLogs.
 //   - Callable sanctionUser : warn/ban/unban/setRole + auditLogs.
@@ -92,6 +95,8 @@ async function seedProfile(uid, role) {
     postCount: 0,
     reportCount: 0,
     likeCount: 0,
+    followerCount: 0,
+    followingCount: 0,
     createdAt: T.createdAt,
     updatedAt: T.updatedAt,
   });
@@ -328,6 +333,63 @@ test('T5  onLikeDeleted : posts.likeCount + users.likeCount décrémentés', asy
 });
 
 // ------------------------------------------------------------
+// Abonnements (Phase 4)
+// ------------------------------------------------------------
+test('T6  onFollowCreated : followingCount + followerCount incrémentés', async () => {
+  await seedProfile('follower01', 'user');
+  await seedProfile('followed01', 'user');
+
+  await db.collection('follows').doc('follower01_followed01').set({
+    followerId: 'follower01',
+    followingId: 'followed01',
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+
+  await waitFor(async () => {
+    const snap = await db.doc('users/follower01').get();
+    return snap.data()?.followingCount === 1;
+  });
+  await waitFor(async () => {
+    const snap = await db.doc('users/followed01').get();
+    return snap.data()?.followerCount === 1;
+  });
+});
+
+test('T7  onFollowDeleted : followingCount + followerCount décrémentés', async () => {
+  await seedProfile('unfollower', 'user');
+  await seedProfile('followed02', 'user');
+  const followRef = db.collection('follows').doc('unfollower_followed02');
+
+  await followRef.set({
+    followerId: 'unfollower',
+    followingId: 'followed02',
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+
+  await waitFor(async () => {
+    const snap = await db.doc('users/unfollower').get();
+    return snap.data()?.followingCount === 1;
+  });
+  await waitFor(async () => {
+    const snap = await db.doc('users/followed02').get();
+    return snap.data()?.followerCount === 1;
+  });
+
+  await followRef.delete();
+
+  await waitFor(async () => {
+    const snap = await db.doc('users/unfollower').get();
+    return snap.data()?.followingCount === 0;
+  });
+  await waitFor(async () => {
+    const snap = await db.doc('users/followed02').get();
+    return snap.data()?.followerCount === 0;
+  });
+});
+
+// ------------------------------------------------------------
 // Callables
 // ------------------------------------------------------------
 test('C1  moderatePost (modérateur) : masquer un post + tracer', async () => {
@@ -524,6 +586,8 @@ test('C7  registerUser : inscription valide + profil Firestore conforme', async 
     'postCount',
     'reportCount',
     'likeCount',
+    'followerCount',
+    'followingCount',
     'createdAt',
     'updatedAt',
   ].sort();
@@ -542,6 +606,9 @@ test('C7  registerUser : inscription valide + profil Firestore conforme', async 
   }
   if (data.postCount !== 0 || data.reportCount !== 0 || data.likeCount !== 0) {
     throw new Error('Les compteurs devraient être initialisés à zéro.');
+  }
+  if (data.followerCount !== 0 || data.followingCount !== 0) {
+    throw new Error('Les compteurs d’abonnements devraient être initialisés à zéro.');
   }
   if (!data.createdAt || !data.updatedAt) {
     throw new Error('createdAt/updatedAt devraient être renseignés.');

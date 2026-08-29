@@ -1,7 +1,7 @@
 rules_version = '2';
 service cloud.firestore {
   // ============================================================
-  // PAROLE - Règles Firestore (Phase 1 : Architecture & Sécurité)
+  // PAROLE - Règles Firestore (Phase 1 + Phase 4 : Follow)
   // PRINCIPE ABSOLU : DENY BY DEFAULT.
   //   - Aucune lecture/écriture sans règle explicite.
   //   - Un utilisateur ne peut modifier que ses propres données.
@@ -91,7 +91,7 @@ service cloud.firestore {
     // updatedAt.
     // Champs système (jamais écrits par un client) : role, banned,
     // bannedUntil, moderationStatus, moderationNote, postCount,
-    // reportCount, likeCount.
+    // reportCount, likeCount, followerCount, followingCount.
     // ----------------------------------------------------------
     match /users/{userId} {
       allow read: if isSignedIn();
@@ -107,12 +107,15 @@ service cloud.firestore {
         && request.resource.data.postCount == 0
         && request.resource.data.reportCount == 0
         && request.resource.data.likeCount == 0
+        && request.resource.data.followerCount == 0
+        && request.resource.data.followingCount == 0
         && request.resource.data.createdAt is timestamp
         && request.resource.data.updatedAt is timestamp
         && request.resource.data.keys().hasOnly([
           'uid', 'displayName', 'bio', 'avatarPath', 'createdAt',
           'updatedAt', 'role', 'banned', 'moderationStatus',
-          'postCount', 'reportCount', 'likeCount'
+          'postCount', 'reportCount', 'likeCount',
+          'followerCount', 'followingCount'
         ]);
 
       // Mise à jour par le propriétaire : champs de profil uniquement.
@@ -126,7 +129,9 @@ service cloud.firestore {
         && request.resource.data.moderationStatus == resource.data.moderationStatus
         && request.resource.data.postCount == resource.data.postCount
         && request.resource.data.reportCount == resource.data.reportCount
-        && request.resource.data.likeCount == resource.data.likeCount;
+        && request.resource.data.likeCount == resource.data.likeCount
+        && request.resource.data.followerCount == resource.data.followerCount
+        && request.resource.data.followingCount == resource.data.followingCount;
 
       // Suppression de profil : jamais via un client.
       allow delete: if false;
@@ -324,13 +329,58 @@ service cloud.firestore {
     }
 
     // ----------------------------------------------------------
-    // Collections prévues pour les phases suivantes (DENY BY DEFAULT
-    // jusqu'à implémentation) : follows, appeals, messages,
-    // hashtags, creatorStats.
+    // follows/{followId}
+    // Abonnements. DÉDUPLICATION par ID déterministe
+    // `followId = ${followerId}_${followingId}` (imposé par la règle
+    // de création). Un second follow est un setDoc sur un document
+    // existant -> UPDATE -> refusé. Un follow est IMMUABLE : le
+    // retrait est une suppression réservée au follower.
+    // Ininterdits : se suivre soi-même, suivre un profil inexistant
+    // ou un profil banni; un utilisateur banni ne peut pas suivre
+    // (canAct()).
+    // Les compteurs (users.followingCount du suiveur et
+    // users.followerCount du suivi) sont maintenus par les Cloud
+    // Functions (onFollowCreated / onFollowDeleted) — jamais par un
+    // client.
     // ----------------------------------------------------------
-    match /follows/{docId} {
-      allow read, write: if false;
+    match /follows/{followId} {
+      // Lecture : le follower, le suivi, ou modérateur/admin. Une
+      // telle règle empêche d'énumérer les abonnements d'autrui ;
+      // la visibilité `followers` des posts ne dépend pas de ce droit
+      // de lecture (exists() reste autorisé dans les règles).
+      allow read: if isSignedIn()
+        && (request.auth.uid == resource.data.followerId
+            || request.auth.uid == resource.data.followingId
+            || isModerator());
+
+      allow create: if canAct()
+        && request.resource.data.followerId == request.auth.uid
+        && followId == request.auth.uid + '_' + request.resource.data.followingId
+        && 'followingId' in request.resource.data
+        && request.resource.data.followingId is string
+        && request.resource.data.followingId.size() > 0
+        && request.resource.data.followingId != request.auth.uid
+        // La cible doit exister et ne pas être bannie.
+        && exists(/databases/$(database)/documents/users/$(request.resource.data.followingId))
+        && !isBanned(request.resource.data.followingId)
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.keys().hasOnly([
+          'followerId', 'followingId', 'createdAt', 'updatedAt'
+        ]);
+
+      // Un follow est immuable : on suit ou on ne suit plus.
+      allow update: if false;
+
+      // Retrait d'un follow : uniquement le follower.
+      allow delete: if isOwner(resource.data.followerId);
     }
+
+    // ----------------------------------------------------------
+    // Collections prévues pour les phases suivantes (DENY BY DEFAULT
+    // jusqu'à implémentation) : appeals, messages, hashtags,
+    // creatorStats.
+    // ----------------------------------------------------------
     match /appeals/{docId} {
       allow read, write: if false;
     }

@@ -1,5 +1,5 @@
 // ============================================================
-// PAROLE - Suite de tests de sécurité (Phase 1 + Phase 3)
+// PAROLE - Suite de tests de sécurité (Phase 1 + Phase 3 + Phase 4)
 // Exécution : npm run test:rules
 //   -> firebase emulators:exec --only firestore,storage "node scripts/test-rules.mjs"
 //
@@ -11,6 +11,10 @@
 // Phase 3 : bloc G (likes) — déduplication par identifiant
 // déterministe, visibilité du post cible, immuabilité, like/retrait
 // par le propriétaire, requête « mes likes ».
+// Phase 4 : bloc H (follows) — déduplication par identifiant
+// déterministe, self-follow interdit, cible requise et non bannie,
+// immuabilité, visibilité limitée, compteurs jamais modifiables par
+// un client, requêtes « mes suivis » / « mes abonnés ».
 // ============================================================
 
 import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
@@ -74,6 +78,8 @@ function user(uid, role = 'user', extra = {}) {
     postCount: 0,
     reportCount: 0,
     likeCount: 0,
+    followerCount: 0,
+    followingCount: 0,
     ...extra,
   };
 }
@@ -104,6 +110,10 @@ function report(reporterId, targetType, targetId, reason = 'harassment', status 
 
 function like(userId, postId, extra = {}) {
   return { userId, postId, createdAt: T.createdAt, updatedAt: T.createdAt, ...extra };
+}
+
+function follow(followerId, followingId, extra = {}) {
+  return { followerId, followingId, createdAt: T.createdAt, updatedAt: T.createdAt, ...extra };
 }
 
 const SEED_USERS = ['alice', 'bob', 'eve', 'charlie', 'dave', 'mod', 'admin'];
@@ -587,6 +597,103 @@ test('G17 L’auteur supprime son propre like OK', async () => {
 test('G18 Utilisateur banni ne peut pas liker', async () => {
   const banned = () => testEnv.authenticatedContext('banned1');
   await expectDenied(setDoc(doc(banned().firestore(), 'likes', 'banned1_post1'), like('banned1', 'post1')));
+});
+
+// ============================================================
+// H. Abonnements (follows)
+// Déduplication par ID déterministe `${followerId}_${followingId}`.
+// Compteurs users.followingCount / users.followerCount maintenus par
+// les Cloud Functions (jamais par un client). Self-follow interdit,
+// cible requise et non bannie, immuabilité, visibilité limitée.
+// ============================================================
+test('H1  Non-auth : lecture d’un follow REFUS', async () => {
+  await expectDenied(getDoc(doc(anon().firestore(), 'follows', 'charlie_alice')));
+});
+test('H2  Non-auth : création d’un follow REFUS', async () => {
+  await expectDenied(setDoc(doc(anon().firestore(), 'follows', 'anon_alice'), follow('anon', 'alice')));
+});
+test('H3  Follow valide (charlie → alice) OK', async () => {
+  await expectAllowed(setDoc(doc(charlie().firestore(), 'follows', 'charlie_alice'), follow('charlie', 'alice')));
+});
+test('H4  Self-follow REFUS', async () => {
+  await expectDenied(setDoc(doc(charlie().firestore(), 'follows', 'charlie_charlie'), follow('charlie', 'charlie')));
+});
+test('H5  Follow avec un ID de document incohérent REFUS', async () => {
+  await expectDenied(setDoc(doc(charlie().firestore(), 'follows', 'wrong_alice'), follow('charlie', 'alice')));
+});
+test('H6  Follow avec followerId tiers REFUS', async () => {
+  await expectDenied(setDoc(doc(charlie().firestore(), 'follows', 'charlie_alice'), follow('bob', 'alice')));
+});
+test('H7  Follow d’un utilisateur inexistant REFUS', async () => {
+  await expectDenied(setDoc(doc(charlie().firestore(), 'follows', 'charlie_ghost'), follow('charlie', 'ghost')));
+});
+test('H8  Follow d’un utilisateur banni REFUS', async () => {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'users', 'bannedTarget'), user('bannedTarget', 'user', { banned: true }));
+  });
+  await expectDenied(setDoc(doc(charlie().firestore(), 'follows', 'charlie_bannedTarget'), follow('charlie', 'bannedTarget')));
+});
+test('H9  Follow dupliqué (même cible) REFUS', async () => {
+  await expectAllowed(setDoc(doc(charlie().firestore(), 'follows', 'charlie_mod'), follow('charlie', 'mod')));
+  await expectDenied(setDoc(doc(charlie().firestore(), 'follows', 'charlie_mod'), follow('charlie', 'mod')));
+});
+test('H10 Modification d’un follow REFUS (immuable)', async () => {
+  await expectAllowed(setDoc(doc(charlie().firestore(), 'follows', 'charlie_dave'), follow('charlie', 'dave')));
+  await expectDenied(updateDoc(doc(charlie().firestore(), 'follows', 'charlie_dave'), { updatedAt: new Date() }));
+});
+test('H11 Follow avec un champ supplémentaire REFUS (hasOnly)', async () => {
+  await expectDenied(setDoc(doc(charlie().firestore(), 'follows', 'charlie_bob'), follow('charlie', 'bob', { extra: true })));
+});
+test('H12 Lecture d’un follow par le follower OK', async () => {
+  await expectAllowed(getDoc(doc(charlie().firestore(), 'follows', 'charlie_alice')));
+});
+test('H13 Lecture d’un follow par l’utilisateur suivi OK', async () => {
+  await expectAllowed(getDoc(doc(alice().firestore(), 'follows', 'charlie_alice')));
+});
+test('H14 Lecture d’un follow par un tiers REFUS', async () => {
+  await expectDenied(getDoc(doc(eve().firestore(), 'follows', 'charlie_alice')));
+});
+test('H15 Requête « mes suivis » (where followerId) OK', async () => {
+  const snap = await getDocs(
+    query(collection(charlie().firestore(), 'follows'), where('followerId', '==', 'charlie'))
+  );
+  const ids = snap.docs.map((d) => d.id);
+  if (!ids.includes('charlie_alice')) {
+    throw new Error(`« Mes suivis » devrait contenir charlie_alice : ${ids.join(', ')}`);
+  }
+});
+test('H16 Requête « mes abonnés » (where followingId) OK', async () => {
+  const snap = await getDocs(
+    query(collection(alice().firestore(), 'follows'), where('followingId', '==', 'alice'))
+  );
+  const ids = snap.docs.map((d) => d.id);
+  if (!ids.includes('charlie_alice')) {
+    throw new Error(`« Mes abonnés » devrait contenir charlie_alice : ${ids.join(', ')}`);
+  }
+});
+test('H17 L’auteur du follow le supprime OK', async () => {
+  await expectAllowed(setDoc(doc(eve().firestore(), 'follows', 'eve_dave'), follow('eve', 'dave')));
+  await expectAllowed(deleteDoc(doc(eve().firestore(), 'follows', 'eve_dave')));
+});
+test('H18 Suppression du follow d’un autre REFUS', async () => {
+  await expectAllowed(setDoc(doc(bob().firestore(), 'follows', 'bob_alice'), follow('bob', 'alice')));
+  await expectDenied(deleteDoc(doc(charlie().firestore(), 'follows', 'bob_alice')));
+});
+test('H19 Utilisateur banni ne peut pas suivre', async () => {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'users', 'bannedfollower'), user('bannedfollower', 'user', { banned: true }));
+  });
+  const banned = () => testEnv.authenticatedContext('bannedfollower');
+  await expectDenied(setDoc(doc(banned().firestore(), 'follows', 'bannedfollower_alice'), follow('bannedfollower', 'alice')));
+});
+test('H20 Un client ne peut pas modifier users.followerCount REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'users', 'eve'), { followerCount: 999 }));
+});
+test('H21 Un client ne peut pas modifier users.followingCount REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'users', 'eve'), { followingCount: 999 }));
+});
+test('H22 Un modérateur lit un follow quel qu’il soit OK', async () => {
+  await expectAllowed(getDoc(doc(mod().firestore(), 'follows', 'bob_alice')));
 });
 
 // ============================================================

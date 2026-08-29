@@ -83,8 +83,8 @@ export function renderSettings(ctx: ViewContext): string {
       <p class="muted small">
         Certains champs sont gérés par le système et ne peuvent pas être modifiés depuis
         l’application : rôle, statut administrateur, statut de bannissement, compteurs
-        (publications, signalements, likes) et données de modération. Toute tentative de
-        modification directe est refusée par les règles de sécurité.
+        (publications, signalements, likes, abonnements/abonnés) et données de modération.
+        Toute tentative de modification directe est refusée par les règles de sécurité.
       </p>
     </section>
   `;
