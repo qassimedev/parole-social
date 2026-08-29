@@ -40,6 +40,15 @@
         { "fieldPath": "recipientId", "order": "ASC" },
         { "fieldPath": "createdAt", "order": "DESC" }
       ]
+    },
+    {
+      "collectionGroup": "comments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "postId", "order": "ASC" },
+        { "fieldPath": "moderationStatus", "order": "ASC" },
+        { "fieldPath": "createdAt", "order": "ASC" }
+      ]
     }
   ],
   "fieldOverrides": []

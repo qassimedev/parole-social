@@ -966,6 +966,42 @@ test('C9  registerUser : email déjà utilisé REFUS', async () => {
   );
 });
 
+test('D1b moderateComment (modérateur) : action remove produit bien removed', async () => {
+  const modUid = await createAuthUser('moderatorD1b@parole.test');
+  await seedProfile(modUid, 'moderator');
+  await seedProfile('ownerD1b', 'user');
+
+  const postRef = await seedPost('ownerD1b');
+  const postId = postRef.id;
+  const commentRef = await db.collection('comments').add({
+    postId, authorId: 'ownerD1b', content: 'Commentaire à retirer', replyToId: '',
+    moderationStatus: 'visible', deletedAt: null, createdAt: T.createdAt, updatedAt: T.createdAt,
+  });
+  const commentId = commentRef.id;
+
+  const moderateComment = httpsCallable(functions, 'moderateComment');
+  const res = await callWithRetry(moderateComment, { commentId, action: 'remove', reason: 'Haineux' });
+  if (res.data.ok !== true || res.data.moderationStatus !== 'removed') {
+    throw new Error(`Réponse inattendue : ${JSON.stringify(res.data)}`);
+  }
+
+  const comment = await commentRef.get();
+  if (comment.data()?.moderationStatus !== 'removed') {
+    throw new Error('Le commentaire devrait être retiré (removed).');
+  }
+
+  await waitFor(async () => {
+    const snap = await db
+      .collection('auditLogs')
+      .where('targetId', '==', commentId)
+      .where('action', '==', 'comment.remove')
+      .get();
+    return snap.size > 0;
+  });
+
+  await signOut(auth);
+});
+
 // ------------------------------------------------------------
 // Exécution
 // ------------------------------------------------------------

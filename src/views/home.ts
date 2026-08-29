@@ -45,14 +45,14 @@ const MODERATION_LABELS: Record<string, string> = {
 // Chaque carte expose un bouton « Répondre » et un conteneur
 // `.comment-reply` dans lequel le composer de réponse est injecté à
 // la volée côté client (voir mountHome).
+// NB : les utilisateurs normaux ne reçoivent que des commentaires
+// `moderationStatus == 'visible'` (les masqués/retirés sont filtrés
+// par la règle + fetchComments) ; aucun badge de modération n'est
+// donc affiché ici.
 function commentMarkup(comment: Comment, authorName: string, level: number): string {
   const date =
     comment.createdAt?.toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' }) ?? '—';
   const initial = escapeHtml((authorName || '?').trim().charAt(0).toUpperCase() || '?');
-  const isModerated = comment.moderationStatus !== 'visible';
-  const moderationBadge = isModerated
-    ? `<span class="badge badge--warn">${escapeHtml(MODERATION_LABELS[comment.moderationStatus] ?? comment.moderationStatus)}</span>`
-    : '';
   return `
     <article class="comment-card comment-card--level-${Math.min(Math.max(level, 0), 2)}"
       data-comment-id="${escapeHtml(comment.id)}">
@@ -62,7 +62,6 @@ function commentMarkup(comment: Comment, authorName: string, level: number): str
           <a class="comment-card__author" href="#/u/${escapeHtml(comment.authorId)}">${escapeHtml(authorName)}</a>
           <span class="comment-card__date muted">${escapeHtml(date)}</span>
         </div>
-        <div class="comment-card__badges">${moderationBadge}</div>
       </header>
       <p class="comment-card__content">${escapeHtml(comment.content)}</p>
       <div class="comment-card__actions">
@@ -77,12 +76,13 @@ function commentMarkup(comment: Comment, authorName: string, level: number): str
   `;
 }
 
-// Placeholder affiché quand le parent d'une réponse est supprimé ou
-// introuvable parmi les commentaires chargés.
+// Placeholder affiché quand le parent d'une réponse est supprimé,
+// masqué/retiré par la modération ou introuvable parmi les
+// commentaires chargés. Son contenu n'est jamais exposé.
 function commentDeletedMarkup(level: number): string {
   return `
     <div class="comment-card comment-card--level-${Math.min(Math.max(level, 0), 2)} comment-card--deleted" role="note">
-      <span class="comment-card__deleted muted">Commentaire supprimé.</span>
+      <span class="comment-card__deleted muted">Commentaire indisponible.</span>
     </div>
   `;
 }
@@ -91,7 +91,9 @@ function commentDeletedMarkup(level: number): string {
 //  - replyToId === '' → commentaire racine ;
 //  - sinon → réponse rendue sous son parent ;
 //  - 3 niveaux d'affichage maximum (0, 1, 2), au-delà aplatis sur 2 ;
-//  - parent supprimé/introuvable → placeholder « Commentaire supprimé ».
+//  - parent supprimé/masqué/retiré ou introuvable → placeholder
+//    « Commentaire indisponible » (le contenu du parent n'est pas
+//    exposé ; seules ses réponses visibles sont affichées).
 function commentsListMarkup(comments: Comment[], authorNames: Map<string, string>): string {
   const ids = new Set(comments.map((c) => c.id));
   const byParent = new Map<string, Comment[]>();

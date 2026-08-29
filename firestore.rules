@@ -191,7 +191,12 @@ service cloud.firestore {
     // comments/{commentId}
     // ----------------------------------------------------------
     match /comments/{commentId} {
-      allow read: if isPostReadable(resource.data.postId);
+      // Lecture : seul le post parent doit être lisible ET le commentaire
+      // doit être visible (ou le demandeur un modérateur/admin). Un
+      // utilisateur normal ne lit pas un commentaire masqué/retiré, même
+      // s'il est l'auteur du post parent.
+      allow read: if isPostReadable(resource.data.postId)
+        && (isModerator() || resource.data.moderationStatus == 'visible');
 
       allow create: if canAct()
         && request.resource.data.authorId == request.auth.uid

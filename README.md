@@ -153,6 +153,16 @@ Functions (`moderatePost`).
 Comme les posts : lecture conditionnée à la lisibilité du post parent,
 création si le post est lisible, modification du contenu par l'auteur,
 suppression par l'auteur. `postId`/`authorId`/`moderationStatus` immuables côté client.
+- **Visibilité des commentaires modérés** : un utilisateur normal (y compris
+  l'auteur du post parent) ne lit que les commentaires
+  `moderationStatus == 'visible'`. La règle de lecture exige
+  `isPostReadable(postId) && (isModerator() || moderationStatus == 'visible')` :
+  seuls modérateurs/admins lisent un commentaire `hidden`/`removed`. La requête
+  client `fetchComments` est filtrée sur `moderationStatus == 'visible'`, ce qui
+  impose l'index composite `comments (postId ASC, moderationStatus ASC,
+  createdAt ASC)` (ajouté dans `firestore.indexes.json`). Pas de suppression
+  physique ni de `deletedAt` dans ce correctif : le `mask`/`remove` lève le
+  commentaire de la lecture publique sans retrait physique.
 
 ### likes/{likeId}
 - **Déduplication** : `likeId = ${userId}_${postId}` — un utilisateur ne peut
@@ -340,6 +350,7 @@ Index composites minimaux (Phase 1), uniquement ceux réellement utilisés :
 | `reports` | `targetId` ASC, `status` ASC | `moderatePost` : signalements pendants d'un post |
 | `moderationQueue` | `status` ASC, `createdAt` DESC | file de modération par état (Phase 2/UI) |
 | `notifications` | `recipientId` ASC, `createdAt` DESC | page `#/notifications` : notifications du user, plus récentes d'abord (Phase 5) |
+| `comments` | `postId` ASC, `moderationStatus` ASC, `createdAt` ASC | `fetchComments` : commentaires visibles d'un post, tri chronologique (visibilité des commentaires modérés) |
 
 La collection `shares` (Phase 6) n'ajoute **aucun index composite** : ses
 requêtes (« mes partages ») sont des `where userId` mono-champ.
@@ -351,6 +362,11 @@ fil *Abonnés* (`authorId in [moi, ...suivis]` + `moderationStatus == 'visible'`
 règles (la règle de lecture déréférence ces trois champs). Le fil *Général*
 repose toujours sur l'index existant `posts [visibility ASC, moderationStatus
 ASC]`, et la requête « mes posts » est mono-champ (`authorId`).
+
+Le correctif « visibilité des commentaires modérés » ajoute l'index composite
+`comments (postId ASC, moderationStatus ASC, createdAt ASC)`, réellement requis
+par la requête `fetchComments` (égalité `postId` + égalité `moderationStatus`
++ tri `createdAt`). Aucun autre index de la collection `comments` n'est ajouté.
 
 Les index nécessaires aux phases suivantes seront ajoutés au fil de l'eau —
 pas par anticipation.
@@ -374,8 +390,8 @@ Ouvrir l'UI des émulateurs : http://localhost:4000
 npm run typecheck      # vérification TypeScript (frontend)
 npm run build          # build frontend
 npm run build:functions
-npm run test:rules     # tests de sécurité Firestore + Storage (175 tests, émulateurs)
-npm run test:functions # tests des Cloud Functions (27 tests, émulateurs)
+npm run test:rules     # tests de sécurité Firestore + Storage (207 tests, émulateurs)
+npm run test:functions # tests des Cloud Functions (41 tests, émulateurs)
 npm run test:all       # tout
 ```
 

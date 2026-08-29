@@ -15,7 +15,9 @@
 //    client).
 //  - Lecture : requête de collection contrainte sur postId
 //    (obligatoire : la règle utilise get()/exists() sur le post
-//    parent) + tri createdAt croissant.
+//    parent), filtrée sur moderationStatus == 'visible' (un
+//    utilisateur normal ne voit pas les commentaires masqués/retirés)
+//    + tri createdAt croissant.
 //  - canAct() (profil présent, non banni) et la lisibilité du post
 //    parent sont appliqués par les règles — le client ne peut pas
 //    les contourner.
@@ -67,13 +69,16 @@ function snapshotToComment(snap: QueryDocumentSnapshot): Comment {
 // ------------------------------------------------------------
 // Commentaires d'un post. La requête est limitée au champ postId
 // (contrainte requise par la règle de lecture avec get()/exists()
-// sur le post parent). Les documents de posts non lisibles sont
+// sur le post parent) et filtrée sur moderationStatus == 'visible'
+// (les commentaires masqués/retirés ne sont jamais retournés à un
+// utilisateur normal). Les documents de posts non lisibles sont
 // rejetés par les règles.
 // ------------------------------------------------------------
 export async function fetchComments(postId: string): Promise<Comment[]> {
   const q = query(
     collection(db, 'comments'),
     where('postId', '==', postId),
+    where('moderationStatus', '==', 'visible'),
     orderBy('createdAt', 'asc')
   );
   const snap = await getDocs(q);

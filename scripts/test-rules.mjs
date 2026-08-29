@@ -132,6 +132,23 @@ function follow(followerId, followingId, extra = {}) {
   return { followerId, followingId, createdAt: T.createdAt, updatedAt: T.createdAt, ...extra };
 }
 
+// Commentaire au schéma complet. `replyToId` est l'id du parent
+// ('' pour un commentaire racine). `moderationStatus` :
+// visible / hidden / removed.
+function comment(postId, authorId, content, moderationStatus = 'visible', replyToId = '', extra = {}) {
+  return {
+    postId,
+    authorId,
+    content,
+    replyToId,
+    createdAt: T.createdAt,
+    updatedAt: T.updatedAt,
+    moderationStatus,
+    deletedAt: null,
+    ...extra,
+  };
+}
+
 // Notification au schéma complet (Phase 5) : tous les champs
 // présents, postId/commentId = '' quand non concernés, read=false et
 // readAt=null à la création. Les règles imposent ce schéma strict.
@@ -196,6 +213,14 @@ async function seed() {
     await setDoc(doc(db, 'notifications', 'n_eve4'), notification('eve', 'dave', 'follow'));
     await setDoc(doc(db, 'notifications', 'n_eve5'), notification('eve', 'bob', 'like', { postId: 'post5' }));
     await setDoc(doc(db, 'notifications', 'n_read'), notification('eve', 'alice', 'like', { postId: 'post1', read: true, readAt: T.createdAt }));
+    // Commentaires « visibilité des commentaires modérés » : documents
+    // seedés par la modération (statuts visibles/masqués/retirés) sur le
+    // post public post1 (auteur alice, non-modérateur). Les tests
+    // vérifient qu'un utilisateur normal n'en lit que les `visible`.
+    await setDoc(doc(db, 'comments', 's_vis'), comment('post1', 'eve', 'Commentaire visible'));
+    await setDoc(doc(db, 'comments', 's_hidden'), comment('post1', 'eve', 'Commentaire masqué', 'hidden'));
+    await setDoc(doc(db, 'comments', 's_removed'), comment('post1', 'eve', 'Commentaire retiré', 'removed'));
+    await setDoc(doc(db, 'comments', 's_reply_hidden'), comment('post1', 'eve', 'Réponse à un commentaire masqué', 'hidden', 's_hidden'));
 
     // Fichiers Storage de base.
     const storage = ctx.storage();
@@ -957,6 +982,77 @@ test('K8  Base : requête posts publics (sans contrainte authorId) OK', async ()
   const ids = snap.docs.map((d) => d.id);
   if (!ids.includes('post1')) {
     throw new Error(`La requête posts publics devrait contenir post1 : ${ids.join(', ')}`);
+  }
+});
+
+// ============================================================
+// M. Correctif dédié : visibilité des commentaires modérés
+//   Un utilisateur normal ne lit QUE les commentaires
+//   moderationStatus == 'visible'. Un modérateur/admin lit également
+//   les 'hidden' et 'removed'. Le fait d'être l'auteur du post parent
+//   (non-modérateur) n'accorde PAS l'accès aux commentaires modérés.
+//   Documents seedés sur post1 (auteur alice, user) : s_vis (visible),
+//   s_hidden (hidden), s_removed (removed), s_reply_hidden (réponse
+//   hidden d'un parent hidden).
+// ============================================================
+test('M1  Commentaire visible lisible par un utilisateur autorisé OK', async () => {
+  await expectAllowed(getDoc(doc(eve().firestore(), 'comments', 's_vis')));
+});
+test('M2  Commentaire hidden illisible par un utilisateur normal REFUS', async () => {
+  await expectDenied(getDoc(doc(eve().firestore(), 'comments', 's_hidden')));
+});
+test('M3  Commentaire removed illisible par un utilisateur normal REFUS', async () => {
+  await expectDenied(getDoc(doc(eve().firestore(), 'comments', 's_removed')));
+});
+test('M4  Commentaire hidden lisible par un modérateur OK', async () => {
+  await expectAllowed(getDoc(doc(mod().firestore(), 'comments', 's_hidden')));
+});
+test('M5  Commentaire removed lisible par un modérateur OK', async () => {
+  await expectAllowed(getDoc(doc(mod().firestore(), 'comments', 's_removed')));
+});
+test('M6  Commentaire hidden lisible par un administrateur OK', async () => {
+  await expectAllowed(getDoc(doc(admin().firestore(), 'comments', 's_hidden')));
+});
+test('M7  Requête filtrée postId + moderationStatus==visible OK (utilisateur normal)', async () => {
+  const snap = await getDocs(
+    query(
+      collection(eve().firestore(), 'comments'),
+      where('postId', '==', 'post1'),
+      where('moderationStatus', '==', 'visible')
+    )
+  );
+  const ids = snap.docs.map((d) => d.id);
+  if (!ids.includes('s_vis')) {
+    throw new Error(`La requête devrait contenir s_vis : ${ids.join(', ')}`);
+  }
+});
+test('M8  Présence hidden/removed : aucune fuite dans la requête utilisateur normal', async () => {
+  const snap = await getDocs(
+    query(
+      collection(eve().firestore(), 'comments'),
+      where('postId', '==', 'post1'),
+      where('moderationStatus', '==', 'visible')
+    )
+  );
+  const ids = snap.docs.map((d) => d.id);
+  const leaked = ids.filter((id) => id === 's_hidden' || id === 's_removed' || id === 's_reply_hidden');
+  if (leaked.length > 0) {
+    throw new Error(`Fuite de commentaires modérés dans la requête utilisateur : ${leaked.join(', ')}`);
+  }
+});
+test('M9  Auteur du post (non-modérateur) ne lit pas les commentaires modérés REFUS', async () => {
+  await expectDenied(getDoc(doc(alice().firestore(), 'comments', 's_hidden')));
+});
+test('M10 Auteur du post (non-modérateur) lit son commentaire visible OK', async () => {
+  await expectAllowed(getDoc(doc(alice().firestore(), 'comments', 's_vis')));
+});
+test('M11 Un modérateur requête les commentaires totaux (postId seul) sans fuite/refus OK', async () => {
+  const snap = await getDocs(
+    query(collection(mod().firestore(), 'comments'), where('postId', '==', 'post1'))
+  );
+  const ids = snap.docs.map((d) => d.id);
+  if (!ids.includes('s_hidden') || !ids.includes('s_removed')) {
+    throw new Error(`Le modérateur devrait voir tous les statuts : ${ids.join(', ')}`);
   }
 });
 
