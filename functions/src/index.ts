@@ -1,12 +1,16 @@
 import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https';
-import { onDocumentCreated, onDocumentDeleted } from 'firebase-functions/v2/firestore';
+import {
+  onDocumentCreated,
+  onDocumentDeleted,
+  onDocumentUpdated,
+} from 'firebase-functions/v2/firestore';
 import { initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import * as logger from 'firebase-functions/logger';
 
 // ============================================================
-// PAROLE - Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4)
+// PAROLE - Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5)
 //
 // Phase 1 : les données sensibles (role, banned, statuts de
 // modération, compteurs système, résolutions de signalements,
@@ -28,6 +32,14 @@ import * as logger from 'firebase-functions/logger';
 // compteurs d'abonnements (`users.followingCount` du suiveur et
 // `users.followerCount` du suivi) à chaque création/suppression d'un
 // follow.
+//
+// Phase 5 : les notifications sont créées EXCLUSIVEMENT ici
+// (`createNotification`), dans onLikeCreated / onCommentCreated /
+// onFollowCreated — jamais pour soi-même. Le compteur
+// `users.notificationCount` (non lues) est maintenu par
+// `onNotificationCreated` (+1), `onNotificationUpdated` (-1
+// idempotent au passage non-lue -> lue) et `onNotificationDeleted`
+// (-1 défensif).
 // ============================================================
 
 initializeApp();
@@ -80,6 +92,42 @@ async function logAudit(
     targetType,
     targetId,
     details,
+    createdAt: serverTimestamp(),
+  });
+}
+
+// ------------------------------------------------------------
+// Notifications (Phase 5)
+// Créées exclusivement ici (Admin SDK) — le client ne peut ni les
+// créer, ni les supprimer (règles Firestore). Champs STRICTEMENT
+// présents à chaque création. Aucune notification à soi-même.
+// ------------------------------------------------------------
+const NOTIFICATION_TYPES = ['like', 'comment', 'follow'] as const;
+type NotificationType = (typeof NOTIFICATION_TYPES)[number];
+
+async function createNotification(params: {
+  recipientId: string;
+  actorId: string;
+  type: NotificationType;
+  postId?: string;
+  commentId?: string;
+}): Promise<void> {
+  if (!params.recipientId || !params.actorId) {
+    return;
+  }
+  // Jamais de notification pour une action sur son propre contenu /
+  // son propre profil.
+  if (params.actorId === params.recipientId) {
+    return;
+  }
+  await db.collection('notifications').add({
+    recipientId: params.recipientId,
+    actorId: params.actorId,
+    type: params.type,
+    postId: params.postId ?? '',
+    commentId: params.commentId ?? '',
+    read: false,
+    readAt: null,
     createdAt: serverTimestamp(),
   });
 }
@@ -209,6 +257,7 @@ export const registerUser = onCall(
       likeCount: 0,
       followerCount: 0,
       followingCount: 0,
+      notificationCount: 0,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -454,9 +503,30 @@ export const onReportCreated = onDocumentCreated('reports/{reportId}', async (ev
 });
 
 export const onCommentCreated = onDocumentCreated('comments/{commentId}', async (event) => {
-  const postId = event.data?.data()?.postId as string | undefined;
+  const data = event.data?.data();
+  const postId = data?.postId as string | undefined;
+  const authorId = data?.authorId as string | undefined;
+  const commentId = event.params.commentId;
+
   if (postId) {
     await db.doc(`posts/${postId}`).update({ commentCount: FieldValue.increment(1) });
+  }
+
+  // Notification au propriétaire du post (jamais pour un self-comment).
+  if (postId && authorId) {
+    const postSnap = await db.doc(`posts/${postId}`).get();
+    if (postSnap.exists) {
+      const postAuthor = postSnap.data()?.authorId as string | undefined;
+      if (postAuthor && postAuthor !== authorId) {
+        await createNotification({
+          recipientId: postAuthor,
+          actorId: authorId,
+          type: 'comment',
+          postId,
+          commentId,
+        });
+      }
+    }
   }
 });
 
@@ -478,7 +548,9 @@ export const onCommentDeleted = onDocumentDeleted('comments/{commentId}', async 
 // pas de profil, on met simplement à jour le post (défensif).
 // ------------------------------------------------------------
 export const onLikeCreated = onDocumentCreated('likes/{likeId}', async (event) => {
-  const postId = event.data?.data()?.postId as string | undefined;
+  const data = event.data?.data();
+  const postId = data?.postId as string | undefined;
+  const likerId = data?.userId as string | undefined;
   if (!postId) {
     return;
   }
@@ -500,6 +572,11 @@ export const onLikeCreated = onDocumentCreated('likes/{likeId}', async (event) =
   }
 
   await batch.commit();
+
+  // Notification au propriétaire du post (jamais pour un self-like).
+  if (authorId && likerId) {
+    await createNotification({ recipientId: authorId, actorId: likerId, type: 'like', postId });
+  }
   logger.info(`Like registered on post ${postId}`);
 });
 
@@ -566,6 +643,12 @@ export const onFollowCreated = onDocumentCreated('follows/{followId}', async (ev
   if (dirty) {
     await batch.commit();
   }
+
+  // Notification « X vous suit ». Le self-follow est déjà interdit
+  // par les règles ; on reste défensif.
+  if (followerId !== followingId) {
+    await createNotification({ recipientId: followingId, actorId: followerId, type: 'follow' });
+  }
   logger.info(`Follow registered: ${followerId} -> ${followingId}`);
 });
 
@@ -597,6 +680,87 @@ export const onFollowDeleted = onDocumentDeleted('follows/{followId}', async (ev
   }
   logger.info(`Follow removed: ${followerId} -> ${followingId}`);
 });
+
+// ------------------------------------------------------------
+// Notifications (Phase 5) — compteur users.notificationCount
+// Maintenu EXCLUSIVEMENT ici (Admin SDK). Le client ne peut jamais
+// le modifier (règles Firestore). Tous les trigger sont défensifs :
+// - onNotificationCreated  : +1 à la création d'une notification
+//                            non lue pour le destinataire.
+// - onNotificationUpdated  : -1 au passage EXACT non lue -> lue
+//                            (idempotent : une notification déjà
+//                            lue ne redécrémente jamais).
+// - onNotificationDeleted  : -1 défensif si une notification NON
+//                            lue est supprimée (le client ne peut
+//                            pas supprimer, mais le serveur reste
+//                            robuste). Les compteurs négatifs sont
+//                            évités (borné à >= 0).
+// ------------------------------------------------------------
+export const onNotificationCreated = onDocumentCreated(
+  'notifications/{notificationId}',
+  async (event) => {
+    const data = event.data?.data();
+    const recipientId = data?.recipientId as string | undefined;
+    const isRead = data?.read === true;
+    if (!recipientId || isRead) {
+      return;
+    }
+    const recipientSnap = await db.doc(`users/${recipientId}`).get();
+    if (!recipientSnap.exists) {
+      return;
+    }
+    await recipientSnap.ref.update({ notificationCount: FieldValue.increment(1) });
+    logger.info(`Notification unread created for user ${recipientId}`);
+  }
+);
+
+export const onNotificationUpdated = onDocumentUpdated(
+  'notifications/{notificationId}',
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    const recipientId = after?.recipientId as string | undefined;
+    if (!recipientId) {
+      return;
+    }
+    // Décrément EXACTEMENT unitaire : uniquement au passage
+    // non lue -> lue. Une notification déjà lue avant/après ne
+    // provoque jamais de nouveau décrément (idempotence).
+    if (before?.read === false && after?.read === true) {
+      const recipientSnap = await db.doc(`users/${recipientId}`).get();
+      if (!recipientSnap.exists) {
+        return;
+      }
+      const current = recipientSnap.data()?.notificationCount as number | undefined;
+      // Borné à >= 0 : défense contre une éventuelle dérive.
+      if (typeof current === 'number' && current > 0) {
+        await recipientSnap.ref.update({ notificationCount: FieldValue.increment(-1) });
+        logger.info(`Notification marked read by user ${recipientId}`);
+      }
+    }
+  }
+);
+
+export const onNotificationDeleted = onDocumentDeleted(
+  'notifications/{notificationId}',
+  async (event) => {
+    const data = event.data?.data();
+    const recipientId = data?.recipientId as string | undefined;
+    const wasUnread = data?.read === false;
+    if (!recipientId || !wasUnread) {
+      return;
+    }
+    const recipientSnap = await db.doc(`users/${recipientId}`).get();
+    if (!recipientSnap.exists) {
+      return;
+    }
+    const current = recipientSnap.data()?.notificationCount as number | undefined;
+    if (typeof current === 'number' && current > 0) {
+      await recipientSnap.ref.update({ notificationCount: FieldValue.increment(-1) });
+      logger.info(`Unread notification deleted for user ${recipientId}`);
+    }
+  }
+);
 
 // ------------------------------------------------------------
 // Santé du service

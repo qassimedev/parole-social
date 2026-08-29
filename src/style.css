@@ -171,6 +171,27 @@ body {
   background: rgba(255, 255, 255, 0.1);
 }
 
+.nav__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding: 0 0.35rem;
+  margin-left: 0.4rem;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.nav__badge[hidden] {
+  display: none;
+}
+
 .page {
   padding: 1.25rem;
   display: flex;
@@ -692,6 +713,86 @@ code {
 .public-info summary {
   cursor: pointer;
   color: var(--color-accent);
+}
+
+/* ------------------------------------------------------------
+   Notifications (Phase 5)
+   ------------------------------------------------------------ */
+.card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.notifications__status,
+.notifications__error,
+.notifications__empty {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--color-muted);
+  padding: 0.5rem 0;
+  flex-wrap: wrap;
+}
+
+.notifications__status {
+  gap: 0.6rem;
+}
+
+.notifications {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.notification-item {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #121a2e;
+  border-radius: 0.6rem;
+  padding: 0.8rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.notification-item--unread {
+  border-color: rgba(233, 69, 96, 0.45);
+  background: rgba(233, 69, 96, 0.06);
+}
+
+.notification-item--read {
+  opacity: 0.75;
+}
+
+.notification-item__meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.notification-item__actor {
+  font-size: 0.925rem;
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+.notification-item__date {
+  font-size: 0.78rem;
+}
+
+.notification-item__text {
+  font-size: 0.925rem;
+  line-height: 1.4;
+}
+
+.notification-item__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 @media (max-width: 520px) {

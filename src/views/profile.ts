@@ -120,7 +120,7 @@ export function renderProfile(ctx: ViewContext): string {
       </section>
     `;
   }
-  return appShell(inner, 'profile', isModeratorRole(profile?.role));
+  return appShell(inner, 'profile', isModeratorRole(profile?.role), profile?.notificationCount ?? 0);
 }
 
 function viewModeMarkup(ctx: ViewContext): string {

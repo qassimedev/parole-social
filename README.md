@@ -37,6 +37,14 @@ avec une décision traçable et susceptible d'appel.
   par les Cloud Functions, self-follow interdit, cible requise et non bannie,
   follow immuable, profil public (`#/u/{userId}`) avec bouton Suivre / Ne plus
   suivre (état optimiste).
+- **Phase 5** (en cours) : notifications — collection `notifications`
+  (likes/commentaires/follows) créée **exclusivement** côté Cloud Functions
+  (jamais pour soi-même), compteur `users.notificationCount` (non lues)
+  maintenu par les triggers `onNotificationCreated/Updated/Deleted` (décrément
+  idempotent au passage non lue → lue), page `#/notifications`, badge dans la
+  navigation alimenté exclusivement par `users.notificationCount`, marquage
+  individuel ou global comme lu, règles strictes (lecture destinataire/admin,
+  notification déjà lue immuable).
 
 ---
 
@@ -65,8 +73,12 @@ avec une décision traçable et susceptible d'appel.
 │ • follows (dédupliqués)     │   │ • onReportCreated (cnt)     │
 │ • reports (dédupliqués)     │   │ • onCommentCreated/Deleted  │
 │ • moderationQueue           │   │ • onLikeCreated/Deleted(cnt)│
-│ • notifications, auditLogs  │   │ • onFollowCreated/Deleted   │
-│ Index composites minimaux   │   │   (cnt abonnements)         │
+│ • notifications             │   │ • onFollowCreated/Deleted   │
+│ • auditLogs                 │   │   (cnt abonnements)         │
+│ Index composites minimaux   │   │ • onLike/Comment/Follow →   │
+│                             │   │   notification (Phase 5)    │
+│                             │   │ • onNotificationCreated/    │
+│                             │   │   Updated/Deleted (cnt)     │
 │                             │   │ Écrit auditLogs (traçable)  │
 └─────────────────────────────┘   └─────────────────────────────┘
         │ accès authentifié
@@ -92,11 +104,14 @@ directement ces données.
 | uid, displayName, bio, avatarPath | string | propriétaire |
 | role (`user`/`moderator`/`admin`) | string | **jamais un client** (Functions) |
 | banned, bannedUntil, moderationStatus | bool/timestamp/string | **jamais un client** (Functions) |
-| postCount, reportCount, likeCount, followerCount, followingCount | number | **jamais un client** (compteurs système) |
+| postCount, reportCount, likeCount, followerCount, followingCount, notificationCount | number | **jamais un client** (compteurs système) |
 
 Lecture : tout utilisateur authentifié. Création : son propre profil uniquement
-(rôle forcé à `user`). Mise à jour : champs de profil uniquement
-(`hasOnly(['displayName','bio','avatarPath','updatedAt'])`).
+(rôle forcé à `user`, `notificationCount` forcé à `0`). Mise à jour : champs de
+profil uniquement
+(`hasOnly(['displayName','bio','avatarPath','updatedAt'])`). Les compteurs —
+dont `notificationCount` — sont épinglés lors des mises à jour client
+(strictement identiques, jamais modifiables par un client).
 
 ### posts/{postId}
 | Champ | Type | Qui écrit |
@@ -166,8 +181,46 @@ suppression par l'auteur. `postId`/`authorId`/`moderationStatus` immuables côt�
   modérateur/admin, écriture Functions uniquement.
 
 ### notifications/{notificationId}
-Créées par les Functions. Le destinataire ne peut que marquer comme lue
-(`read`, `readAt`). Aucune création/suppression client.
+Notifications de likes, commentaires et abonnements — **créées uniquement par
+les Cloud Functions** (aucune création/suppression client).
+
+| Champ | Type | Description |
+|---|---|---|
+| recipientId | string | destinataire |
+| actorId | string | auteur de l'action |
+| type | `like` / `comment` / `follow` | nature de la notification |
+| postId | string | post concerné, `''` sinon |
+| commentId | string | commentaire concerné, `''` sinon |
+| read | boolean | `false` à la création |
+| readAt | Timestamp \| null | `null` à la création |
+| createdAt | Timestamp | horodatage serveur |
+
+Schéma strict (`hasOnly`) : tous les champs sont présents à chaque création et
+**immuables côté client** (`recipientId`, `actorId`, `type`, `postId`,
+`commentId`, `createdAt` épinglés par les règles).
+
+- **Lecture** : le destinataire (`recipientId == auth.uid`) ou un admin.
+- **Création / suppression** : toujours refusées pour un client.
+- **Mise à jour** : uniquement le destinataire, et uniquement le passage
+  `read: false → true` avec `readAt` obligatoire de type timestamp
+  (`hasOnly(['read','readAt'])`). Une notification **déjà lue est immuable** —
+  ce qui rend le décrément de `users.notificationCount` **exactement unitaire**
+  (idempotent, pas de double décrément).
+
+`users.notificationCount` = nombre de notifications **non lues**. Initialisé à
+`0` à la création du profil, maintenu **exclusivement** par les Cloud Functions,
+jamais modifiable par un client.
+
+Types de notifications (jamais pour soi-même) :
+- `like` : quelqu'un a aimé votre publication → propriétaire du post.
+- `comment` : quelqu'un a commenté votre publication → propriétaire du post.
+- `follow` : quelqu'un vous suit → utilisateur suivi.
+
+Page `#/notifications` : liste (chargement / vide / erreur + Réessayer), état
+lu/non lu, date, nom de l'acteur (lien `#/u/{actorId}`), bouton « Marquer comme
+lu » par notification et « Tout marquer comme lu ». Le **badge Notifications**
+de la navigation affiche exclusivement la valeur de `users.notificationCount`
+(copie en mémoire rafraîchie dans le store après marquage) et disparaît à zéro.
 
 ### auditLogs/{logId}
 Journal append-only des actions administratives et de modération.
@@ -185,6 +238,7 @@ Journal append-only des actions administratives et de modération.
 | Créer son profil / posts / commentaires / signalements | ✔ | ✔ | ✔ |
 | Liker / retirer son like | ✔ | ✔ | ✔ |
 | Suivre / ne plus suivre un utilisateur | ✔ | ✔ | ✔ |
+| Lire / marquer ses notifications | ✔ | ✔ | ✔ (admin : lit toutes) |
 | Modifier/supprimer ses propres contenus | ✔ | ✔ | ✔ |
 | Lire les posts publics | ✔ | ✔ | ✔ |
 | Lire les posts masqués | ✖ (sauf auteur) | ✔ | ✔ |
@@ -210,7 +264,7 @@ modération, les compteurs système, les décisions de modération, les
 - Lecture des médias de posts conditionnée à la visibilité du post Firestore
   (`firestore.get` / `firestore.exists`) : un post masqué = médias illisibles.
 
-## Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4)
+## Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5)
 
 | Fonction | Type | Rôle requis | Effet |
 |---|---|---|---|
@@ -218,13 +272,21 @@ modération, les compteurs système, les décisions de modération, les
 | `moderatePost` | callable | moderator/admin | mask/restore/maintain/remove d'un post, résout les signalements pendants, met à jour la file, écrit `auditLogs` |
 | `sanctionUser` | callable | moderator (warn) / admin (ban, unban, setRole) | warn/ban/unban/changement de rôle, écrit `auditLogs` |
 | `onReportCreated` | trigger | — | incrémente `post.reportCount`, crée/met à jour la file de modération |
-| `onCommentCreated` | trigger | — | incrémente `post.commentCount` |
+| `onCommentCreated` | trigger | — | incrémente `post.commentCount` + notification « comment » au propriétaire du post |
 | `onCommentDeleted` | trigger | — | décrémente `post.commentCount` |
-| `onLikeCreated` (Phase 3) | trigger | — | incrémente `post.likeCount` et `users.likeCount` (likes reçus) |
+| `onLikeCreated` (Phase 3) | trigger | — | incrémente `post.likeCount` et `users.likeCount` (likes reçus) + notification « like » au propriétaire du post |
 | `onLikeDeleted` (Phase 3) | trigger | — | décrémente `post.likeCount` et `users.likeCount` (likes reçus) |
-| `onFollowCreated` (Phase 4) | trigger | — | incrémente `users.followingCount` (suiveur) et `users.followerCount` (suivi) |
+| `onFollowCreated` (Phase 4) | trigger | — | incrémente `users.followingCount` (suiveur) et `users.followerCount` (suivi) + notification « follow » au suivi |
 | `onFollowDeleted` (Phase 4) | trigger | — | décrémente `users.followingCount` (suiveur) et `users.followerCount` (suivi) |
+| `onNotificationCreated` (Phase 5) | trigger | — | incrémente `users.notificationCount` (+1) pour une notification non lue |
+| `onNotificationUpdated` (Phase 5) | trigger | — | décrémente `users.notificationCount` (−1) au passage **exact** non lue → lue (idempotent, borné à ≥ 0) |
+| `onNotificationDeleted` (Phase 5) | trigger | — | décrément défensif (−1) si une notification **non lue** est supprimée (borné à ≥ 0) |
 | `healthcheck` | HTTP | — | état du service |
+
+Les notifications listent **uniquement** les champs du schéma (schema strict) :
+`recipientId`, `actorId`, `type`, `postId`, `commentId`, `read`, `readAt`,
+`createdAt`. `replyToId` reste `''` pour cette phase : pas encore d'UI de
+réponse, donc pas de notification à l'auteur d'un commentaire parent.
 
 ## Index Firestore
 
@@ -234,9 +296,10 @@ Index composites minimaux (Phase 1), uniquement ceux réellement utilisés :
 |---|---|---|
 | `reports` | `targetId` ASC, `status` ASC | `moderatePost` : signalements pendants d'un post |
 | `moderationQueue` | `status` ASC, `createdAt` DESC | file de modération par état (Phase 2/UI) |
+| `notifications` | `recipientId` ASC, `createdAt` DESC | page `#/notifications` : notifications du user, plus récentes d'abord (Phase 5) |
 
-Les index nécessaires aux phases suivantes (flux, notifications, etc.) seront
-ajoutés au fil de l'eau — pas par anticipation.
+Les index nécessaires aux phases suivantes (flux, etc.) seront ajoutés au fil
+de l'eau — pas par anticipation.
 
 ## Commandes
 
@@ -257,8 +320,8 @@ Ouvrir l'UI des émulateurs : http://localhost:4000
 npm run typecheck      # vérification TypeScript (frontend)
 npm run build          # build frontend
 npm run build:functions
-npm run test:rules     # tests de sécurité Firestore + Storage (136 tests, émulateurs)
-npm run test:functions # tests des Cloud Functions (16 tests, émulateurs)
+npm run test:rules     # tests de sécurité Firestore + Storage (155 tests, émulateurs)
+npm run test:functions # tests des Cloud Functions (23 tests, émulateurs)
 npm run test:all       # tout
 ```
 

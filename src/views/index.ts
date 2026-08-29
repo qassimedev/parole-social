@@ -18,6 +18,7 @@ import { renderProfile, mountProfile } from './profile';
 import { renderSettings, mountSettings } from './settings';
 import { renderModeration, mountModeration } from './moderation';
 import { renderUser, mountUser } from './user';
+import { renderNotifications, mountNotifications } from './notifications';
 
 export function splashView(): string {
   return `
@@ -103,6 +104,10 @@ export function renderView(root: HTMLElement): void {
     case 'settings':
       root.innerHTML = renderSettings(ctx);
       mountSettings(root, ctx);
+      return;
+    case 'notifications':
+      root.innerHTML = renderNotifications(ctx);
+      mountNotifications(root, ctx);
       return;
     case 'moderation':
       // Accès réservé modérateur/admin : l'affichage n'est jamais

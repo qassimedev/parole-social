@@ -13,6 +13,11 @@
 //   - Déclencheurs onFollowCreated / onFollowDeleted (Phase 4) :
 //     maintien de users.followingCount (suiveur) et
 //     users.followerCount (suivi).
+//   - Déclencheurs de notifications (Phase 5) : onLikeCreated /
+//     onCommentCreated / onFollowCreated créent une notification au
+//     propriétaire concerné (jamais pour soi-même) ; onNotification
+//     Created/Updated/Deleted maintiennent users.notificationCount
+//     (décrément idempotent au passage non lue -> lue).
 //   - Callable moderatePost : masquer/rétablir/maintenir/retirer un
 //     post, résoudre les signalements, tracer dans auditLogs.
 //   - Callable sanctionUser : warn/ban/unban/setRole + auditLogs.
@@ -97,8 +102,9 @@ async function seedProfile(uid, role) {
     likeCount: 0,
     followerCount: 0,
     followingCount: 0,
+    notificationCount: 0,
     createdAt: T.createdAt,
-    updatedAt: T.updatedAt,
+    updatedAt: T.createdAt,
   });
 }
 
@@ -390,6 +396,205 @@ test('T7  onFollowDeleted : followingCount + followerCount décrémentés', asyn
 });
 
 // ------------------------------------------------------------
+// Notifications (Phase 5)
+// ------------------------------------------------------------
+async function seedNotification(recipientId, actorId, type, overrides = {}) {
+  return db.collection('notifications').add({
+    recipientId,
+    actorId,
+    type,
+    postId: '',
+    commentId: '',
+    read: false,
+    readAt: null,
+    createdAt: T.createdAt,
+    ...overrides,
+  });
+}
+
+test('T8  onLikeCreated : notification « like » créée pour le propriétaire du post', async () => {
+  await seedProfile('liker8', 'user');
+  await seedProfile('owner8', 'user');
+
+  const postRef = await seedPost('owner8');
+  const postId = postRef.id;
+
+  await db.collection('likes').doc(`liker8_${postId}`).set({
+    userId: 'liker8',
+    postId,
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+
+  const notifications = await waitFor(async () => {
+    const snap = await db.collection('notifications').where('postId', '==', postId).get();
+    return snap.size > 0 ? snap.docs : null;
+  });
+  const n = notifications[0].data();
+  if (n.recipientId !== 'owner8' || n.actorId !== 'liker8' || n.type !== 'like') {
+    throw new Error(`Notification like incohérente : ${JSON.stringify(n)}`);
+  }
+  if (n.postId !== postId || n.commentId !== '' || n.read !== false || n.readAt !== null) {
+    throw new Error(`Schéma de notification incohérent : ${JSON.stringify(n)}`);
+  }
+  if (!n.createdAt) {
+    throw new Error('createdAt devrait être renseigné.');
+  }
+});
+
+test('T9  onLikeCreated : like sur son propre post → aucune notification', async () => {
+  await seedProfile('owner9', 'user');
+
+  const postRef = await seedPost('owner9');
+  const postId = postRef.id;
+
+  await db.collection('likes').doc(`owner9_${postId}`).set({
+    userId: 'owner9',
+    postId,
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+
+  // Le likeCount est incrémenté à la fin de onLikeCreated : attendre
+  // cette valeur garantit que le déclencheur s'est exécuté.
+  await waitFor(async () => {
+    const snap = await postRef.get();
+    return snap.data()?.likeCount === 1;
+  });
+  await sleep(1000);
+  const snap = await db.collection('notifications').where('postId', '==', postId).get();
+  if (snap.size > 0) {
+    throw new Error('Aucune notification ne devrait exister pour un like sur son propre post.');
+  }
+});
+
+test('T10 onCommentCreated : notification « comment » créée pour le propriétaire du post', async () => {
+  await seedProfile('commenter10', 'user');
+  await seedProfile('owner10', 'user');
+
+  const postRef = await seedPost('owner10');
+  const postId = postRef.id;
+
+  const commentRef = await db.collection('comments').add({
+    postId,
+    authorId: 'commenter10',
+    content: 'Un commentaire',
+    replyToId: '',
+    moderationStatus: 'visible',
+    deletedAt: null,
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+  const commentId = commentRef.id;
+
+  const notifications = await waitFor(async () => {
+    const snap = await db.collection('notifications').where('commentId', '==', commentId).get();
+    return snap.size > 0 ? snap.docs : null;
+  });
+  const n = notifications[0].data();
+  if (n.recipientId !== 'owner10' || n.actorId !== 'commenter10' || n.type !== 'comment') {
+    throw new Error(`Notification comment incohérente : ${JSON.stringify(n)}`);
+  }
+  if (n.postId !== postId || n.commentId !== commentId || n.read !== false || n.readAt !== null) {
+    throw new Error(`Schéma de notification incohérent : ${JSON.stringify(n)}`);
+  }
+});
+
+test('T11 onCommentCreated : commentaire sur son propre post → aucune notification', async () => {
+  await seedProfile('owner11', 'user');
+
+  const postRef = await seedPost('owner11');
+  const postId = postRef.id;
+
+  await db.collection('comments').add({
+    postId,
+    authorId: 'owner11',
+    content: 'Self-commentaire',
+    replyToId: '',
+    moderationStatus: 'visible',
+    deletedAt: null,
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+
+  // commentCount incrémenté à la fin du déclencheur : garantit son exécution.
+  await waitFor(async () => {
+    const snap = await postRef.get();
+    return snap.data()?.commentCount === 1;
+  });
+  await sleep(1000);
+  const snap = await db.collection('notifications').where('postId', '==', postId).get();
+  if (snap.size > 0) {
+    throw new Error('Aucune notification ne devrait exister pour un commentaire sur son propre post.');
+  }
+});
+
+test('T12 onFollowCreated : notification « follow » créée pour l’utilisateur suivi', async () => {
+  await seedProfile('follower12', 'user');
+  await seedProfile('followed12', 'user');
+
+  await db.collection('follows').doc('follower12_followed12').set({
+    followerId: 'follower12',
+    followingId: 'followed12',
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+
+  const notifications = await waitFor(async () => {
+    const snap = await db.collection('notifications').where('recipientId', '==', 'followed12').get();
+    const followDocs = snap.docs.filter((d) => d.data().type === 'follow' && d.data().actorId === 'follower12');
+    return followDocs.length > 0 ? followDocs : null;
+  });
+  const n = notifications[0].data();
+  if (n.recipientId !== 'followed12' || n.actorId !== 'follower12' || n.type !== 'follow') {
+    throw new Error(`Notification follow incohérente : ${JSON.stringify(n)}`);
+  }
+  if (n.postId !== '' || n.commentId !== '' || n.read !== false || n.readAt !== null) {
+    throw new Error(`Schéma de notification incohérent : ${JSON.stringify(n)}`);
+  }
+});
+
+test('T13 onNotificationCreated : notification non lue → notificationCount +1', async () => {
+  await seedProfile('recipient13', 'user');
+  if ((await db.doc('users/recipient13').get()).data()?.notificationCount !== 0) {
+    throw new Error('notificationCount devrait démarrer à 0.');
+  }
+
+  await seedNotification('recipient13', 'someone', 'follow');
+
+  await waitFor(async () => {
+    const snap = await db.doc('users/recipient13').get();
+    return snap.data()?.notificationCount === 1;
+  });
+});
+
+test('T14 onNotificationUpdated : marquage lu → -1, et idempotence', async () => {
+  await seedProfile('recipient14', 'user');
+  const notifRef = await seedNotification('recipient14', 'someone', 'like');
+
+  await waitFor(async () => {
+    const snap = await db.doc('users/recipient14').get();
+    return snap.data()?.notificationCount === 1;
+  });
+
+  // Marquage lu → décrément de 1.
+  await notifRef.update({ read: true, readAt: T.createdAt });
+  await waitFor(async () => {
+    const snap = await db.doc('users/recipient14').get();
+    return snap.data()?.notificationCount === 0;
+  });
+
+  // Idempotence : re-marquage d'une notification déjà lue → aucun
+  // second décrément (le compteur ne passe jamais négatif).
+  await notifRef.update({ read: true, readAt: new Date('2026-02-01T00:00:00Z') });
+  await sleep(1500);
+  const snap = await db.doc('users/recipient14').get();
+  if (snap.data()?.notificationCount !== 0) {
+    throw new Error(`notificationCount devrait rester 0 après re-marquage, obtenu ${snap.data()?.notificationCount}`);
+  }
+});
+
+// ------------------------------------------------------------
 // Callables
 // ------------------------------------------------------------
 test('C1  moderatePost (modérateur) : masquer un post + tracer', async () => {
@@ -588,6 +793,7 @@ test('C7  registerUser : inscription valide + profil Firestore conforme', async 
     'likeCount',
     'followerCount',
     'followingCount',
+    'notificationCount',
     'createdAt',
     'updatedAt',
   ].sort();
@@ -609,6 +815,9 @@ test('C7  registerUser : inscription valide + profil Firestore conforme', async 
   }
   if (data.followerCount !== 0 || data.followingCount !== 0) {
     throw new Error('Les compteurs d’abonnements devraient être initialisés à zéro.');
+  }
+  if (data.notificationCount !== 0) {
+    throw new Error('notificationCount devrait être initialisé à zéro.');
   }
   if (!data.createdAt || !data.updatedAt) {
     throw new Error('createdAt/updatedAt devraient être renseignés.');

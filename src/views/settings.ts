@@ -88,7 +88,7 @@ export function renderSettings(ctx: ViewContext): string {
       </p>
     </section>
   `;
-  return appShell(inner, 'settings', isModeratorRole(profile?.role));
+  return appShell(inner, 'settings', isModeratorRole(profile?.role), profile?.notificationCount ?? 0);
 }
 
 export function mountSettings(root: HTMLElement, ctx: ViewContext): void {

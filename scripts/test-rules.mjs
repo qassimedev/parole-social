@@ -15,6 +15,10 @@
 // déterministe, self-follow interdit, cible requise et non bannie,
 // immuabilité, visibilité limitée, compteurs jamais modifiables par
 // un client, requêtes « mes suivis » / « mes abonnés ».
+// Phase 5 : bloc I (notifications) — création/suppression réservées
+// aux Cloud Functions, lecture destinataire/admin uniquement, champ
+// users.notificationCount verrouillé, marquage non lue -> lue strict
+// et idempotent, notification déjà lue immuable.
 // ============================================================
 
 import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
@@ -80,6 +84,7 @@ function user(uid, role = 'user', extra = {}) {
     likeCount: 0,
     followerCount: 0,
     followingCount: 0,
+    notificationCount: 0,
     ...extra,
   };
 }
@@ -114,6 +119,23 @@ function like(userId, postId, extra = {}) {
 
 function follow(followerId, followingId, extra = {}) {
   return { followerId, followingId, createdAt: T.createdAt, updatedAt: T.createdAt, ...extra };
+}
+
+// Notification au schéma complet (Phase 5) : tous les champs
+// présents, postId/commentId = '' quand non concernés, read=false et
+// readAt=null à la création. Les règles imposent ce schéma strict.
+function notification(recipientId, actorId, type, extra = {}) {
+  return {
+    recipientId,
+    actorId,
+    type,
+    postId: '',
+    commentId: '',
+    read: false,
+    readAt: null,
+    createdAt: T.createdAt,
+    ...extra,
+  };
 }
 
 const SEED_USERS = ['alice', 'bob', 'eve', 'charlie', 'dave', 'mod', 'admin'];
@@ -154,18 +176,15 @@ async function seed() {
       details: { reason: 'test' },
       createdAt: T.createdAt,
     });
-    await setDoc(doc(db, 'notifications', 'n_eve'), {
-      recipientId: 'eve',
-      type: 'system',
-      read: false,
-      createdAt: T.createdAt,
-    });
-    await setDoc(doc(db, 'notifications', 'n_bob'), {
-      recipientId: 'bob',
-      type: 'system',
-      read: false,
-      createdAt: T.createdAt,
-    });
+    // Notifications (Phase 5) au schéma complet.
+    await setDoc(doc(db, 'notifications', 'n_eve'), notification('eve', 'alice', 'comment', { postId: 'post1', commentId: 'c_eve' }));
+    await setDoc(doc(db, 'notifications', 'n_bob'), notification('bob', 'alice', 'like', { postId: 'post1' }));
+    await setDoc(doc(db, 'notifications', 'n_eve2'), notification('eve', 'alice', 'like', { postId: 'post1' }));
+    await setDoc(doc(db, 'notifications', 'n_bob2'), notification('bob', 'alice', 'follow'));
+    await setDoc(doc(db, 'notifications', 'n_eve3'), notification('eve', 'charlie', 'comment', { postId: 'post1', commentId: 'c_eve3' }));
+    await setDoc(doc(db, 'notifications', 'n_eve4'), notification('eve', 'dave', 'follow'));
+    await setDoc(doc(db, 'notifications', 'n_eve5'), notification('eve', 'bob', 'like', { postId: 'post5' }));
+    await setDoc(doc(db, 'notifications', 'n_read'), notification('eve', 'alice', 'like', { postId: 'post1', read: true, readAt: T.createdAt }));
 
     // Fichiers Storage de base.
     const storage = ctx.storage();
@@ -694,6 +713,75 @@ test('H21 Un client ne peut pas modifier users.followingCount REFUS', async () =
 });
 test('H22 Un modérateur lit un follow quel qu’il soit OK', async () => {
   await expectAllowed(getDoc(doc(mod().firestore(), 'follows', 'bob_alice')));
+});
+
+// ============================================================
+// I. Notifications (Phase 5)
+// Créées/supprimées EXCLUSIVEMENT par les Cloud Functions ; lecture
+// réservée au destinataire (ou admin) ; le client ne peut que marquer
+// une notification NON LUE comme lue (read + readAt timestamp), tous
+// les autres champs étant épinglés par les règles. Une notification
+// déjà lue est immuable, ce qui rend le décrément de
+// users.notificationCount exactement unitaire (idempotent).
+// ============================================================
+test('I1  Le destinataire lit ses propres notifications OK', async () => {
+  await expectAllowed(getDoc(doc(eve().firestore(), 'notifications', 'n_eve2')));
+});
+test('I2  Un admin lit les notifications OK', async () => {
+  await expectAllowed(getDoc(doc(admin().firestore(), 'notifications', 'n_bob2')));
+});
+test('I3  Un utilisateur non connecté ne peut pas lire REFUS', async () => {
+  await expectDenied(getDoc(doc(anon().firestore(), 'notifications', 'n_eve2')));
+});
+test('I4  Lecture des notifications d’un autre utilisateur REFUS', async () => {
+  await expectDenied(getDoc(doc(eve().firestore(), 'notifications', 'n_bob2')));
+});
+test('I5  Création d’une notification par le client REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'notifications', 'n_eve_new'), notification('eve', 'bob', 'like')));
+});
+test('I6  Suppression d’une notification par le client REFUS', async () => {
+  await expectDenied(deleteDoc(doc(eve().firestore(), 'notifications', 'n_eve2')));
+});
+test('I7  Modification de recipientId REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'notifications', 'n_eve3'), { recipientId: 'bob' }));
+});
+test('I8  Modification de actorId REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'notifications', 'n_eve3'), { actorId: 'bob' }));
+});
+test('I9  Modification de type REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'notifications', 'n_eve3'), { type: 'follow' }));
+});
+test('I10 Modification de createdAt REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'notifications', 'n_eve3'), { createdAt: new Date('2025-01-01T00:00:00Z') }));
+});
+test('I11 Le destinataire marque sa notification comme lue OK', async () => {
+  await expectAllowed(updateDoc(doc(eve().firestore(), 'notifications', 'n_eve3'), { read: true, readAt: new Date() }));
+});
+test('I12 Un tiers ne peut pas marquer comme lue REFUS', async () => {
+  await expectDenied(updateDoc(doc(bob().firestore(), 'notifications', 'n_eve4'), { read: true, readAt: new Date() }));
+});
+test('I13 Modification arbitraire (champ nouveau) REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'notifications', 'n_eve4'), { read: true, readAt: new Date(), content: 'x' }));
+});
+test('I14 Le client ne peut pas modifier users.notificationCount REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'users', 'eve'), { notificationCount: 5 }));
+});
+test('I15 Schéma strict : postId/commentId modifiés REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'notifications', 'n_eve4'), { read: true, readAt: new Date(), postId: 'x' }));
+  await expectDenied(updateDoc(doc(eve().firestore(), 'notifications', 'n_eve4'), { read: true, readAt: new Date(), commentId: 'y' }));
+});
+test('I16 Une notification déjà lue est immuable REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'notifications', 'n_read'), { read: true, readAt: new Date() }));
+  await expectDenied(updateDoc(doc(eve().firestore(), 'notifications', 'n_read'), { read: false, readAt: null }));
+});
+test('I17 readAt non-timestamp REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'notifications', 'n_eve5'), { read: true, readAt: '2026-01-01' }));
+});
+test('I18 read=true sans readAt REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'notifications', 'n_eve5'), { read: true }));
+});
+test('I19 Création d’un profil avec notificationCount non nul REFUS', async () => {
+  await expectDenied(setDoc(doc(zoe().firestore(), 'users', 'zoe9'), user('zoe9', 'user', { notificationCount: 5 })));
 });
 
 // ============================================================

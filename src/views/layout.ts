@@ -57,9 +57,26 @@ export function authShell(inner: string): string {
 // `canModerate` ajoute la navigation vers l'espace de modération
 // (réservée aux modérateurs/admins ; l'accès réel reste contrôlé
 // par la route et par les règles/Functions, pas par l'affichage).
-export function appShell(inner: string, active = '', canModerate = false): string {
+// `notificationCount` alimente EXCLUSIVEMENT le badge Notifications
+// (source : users.notificationCount, maintenu côté serveur). Le
+// badge disparaît quand le compteur vaut 0.
+export function appShell(
+  inner: string,
+  active = '',
+  canModerate = false,
+  notificationCount = 0
+): string {
+  const count = Number.isFinite(notificationCount) ? Math.max(0, notificationCount) : 0;
   const link = (name: string, href: string, label: string) =>
     `<a class="nav__link${active === name ? ' nav__link--active' : ''}" href="${href}">${label}</a>`;
+  // Badge toujours présent dans le DOM (id stable) pour que les vues
+  // le mettent à jour après marquage ; caché quand le compteur = 0.
+  const notificationsLink = `
+    <a class="nav__link${active === 'notifications' ? ' nav__link--active' : ''}" href="#/notifications">
+      Notifications
+      <span class="nav__badge" id="nav-notifications-badge" data-count="${count}" ${count > 0 ? '' : 'hidden'}>${count > 0 ? count : 0}</span>
+    </a>
+  `;
   return `
     <div class="app">
       <header class="topbar">
@@ -69,6 +86,7 @@ export function appShell(inner: string, active = '', canModerate = false): strin
         </a>
         <nav class="nav" aria-label="Navigation principale">
           ${link('home', '#/', 'Accueil')}
+          ${notificationsLink}
           ${link('profile', '#/profile', 'Profil')}
           ${link('settings', '#/settings', 'Paramètres')}
           ${canModerate ? link('moderation', '#/moderation', 'Modération') : ''}

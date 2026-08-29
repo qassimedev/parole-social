@@ -91,7 +91,8 @@ service cloud.firestore {
     // updatedAt.
     // Champs système (jamais écrits par un client) : role, banned,
     // bannedUntil, moderationStatus, moderationNote, postCount,
-    // reportCount, likeCount, followerCount, followingCount.
+    // reportCount, likeCount, followerCount, followingCount,
+    // notificationCount.
     // ----------------------------------------------------------
     match /users/{userId} {
       allow read: if isSignedIn();
@@ -109,13 +110,14 @@ service cloud.firestore {
         && request.resource.data.likeCount == 0
         && request.resource.data.followerCount == 0
         && request.resource.data.followingCount == 0
+        && request.resource.data.notificationCount == 0
         && request.resource.data.createdAt is timestamp
         && request.resource.data.updatedAt is timestamp
         && request.resource.data.keys().hasOnly([
           'uid', 'displayName', 'bio', 'avatarPath', 'createdAt',
           'updatedAt', 'role', 'banned', 'moderationStatus',
           'postCount', 'reportCount', 'likeCount',
-          'followerCount', 'followingCount'
+          'followerCount', 'followingCount', 'notificationCount'
         ]);
 
       // Mise à jour par le propriétaire : champs de profil uniquement.
@@ -131,7 +133,8 @@ service cloud.firestore {
         && request.resource.data.reportCount == resource.data.reportCount
         && request.resource.data.likeCount == resource.data.likeCount
         && request.resource.data.followerCount == resource.data.followerCount
-        && request.resource.data.followingCount == resource.data.followingCount;
+        && request.resource.data.followingCount == resource.data.followingCount
+        && request.resource.data.notificationCount == resource.data.notificationCount;
 
       // Suppression de profil : jamais via un client.
       allow delete: if false;
@@ -301,8 +304,14 @@ service cloud.firestore {
 
     // ----------------------------------------------------------
     // notifications/{notificationId}
-    // Créées par les Cloud Functions. Le destinataire peut uniquement
-    // marquer ses notifications comme lues.
+    // Créées EXCLUSIVEMENT par les Cloud Functions (Admin SDK) :
+    // le client ne peut ni créer ni supprimer une notification et
+    // ne peut modifier ni recipientId, ni actorId, ni type, ni
+    // postId, ni commentId, ni createdAt. Le destinataire peut
+    // UNIQUEMENT marquer une notification NON LUE comme lue
+    // (read = true + readAt timestamp). Une notification déjà lue
+    // est immuable — ceci rend le décrément de
+    // users.notificationCount exactement unitaire (idempotent).
     // ----------------------------------------------------------
     match /notifications/{notificationId} {
       allow read: if isSignedIn()
@@ -310,9 +319,17 @@ service cloud.firestore {
 
       allow update: if isSignedIn()
         && resource.data.recipientId == request.auth.uid
+        && request.resource.data.recipientId == resource.data.recipientId
+        && request.resource.data.actorId == resource.data.actorId
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.postId == resource.data.postId
+        && request.resource.data.commentId == resource.data.commentId
+        && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['read', 'readAt'])
-        && request.resource.data.recipientId == resource.data.recipientId;
+        && request.resource.data.read == true
+        && request.resource.data.readAt is timestamp
+        && !(resource.data.read == true);
 
       allow create, delete: if false;
     }

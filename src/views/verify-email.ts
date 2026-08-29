@@ -48,7 +48,7 @@ export function renderVerifyEmail(ctx: ViewContext): string {
       ` : ''}
     </section>
   `;
-  return appShell(inner, 'home');
+  return appShell(inner, 'home', false, session.profile?.notificationCount ?? 0);
 }
 
 export function mountVerifyEmail(root: HTMLElement, ctx: ViewContext): void {

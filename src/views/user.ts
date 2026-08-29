@@ -48,6 +48,7 @@ function snapshotToProfile(data: DocumentData): UserProfile {
     likeCount: data.likeCount ?? 0,
     followerCount: typeof data.followerCount === 'number' ? data.followerCount : 0,
     followingCount: typeof data.followingCount === 'number' ? data.followingCount : 0,
+    notificationCount: typeof data.notificationCount === 'number' ? data.notificationCount : 0,
     createdAt: data.createdAt?.toDate?.() ?? new Date(),
     updatedAt: data.updatedAt?.toDate?.() ?? new Date(),
   };
@@ -81,7 +82,7 @@ export function renderUser(ctx: ViewContext): string {
         <h2 class="card__title">Profil introuvable</h2>
         <p class="muted">Utilisateur non spécifié.</p>
       </section>
-    `, 'user', isModeratorRole(session.profile?.role));
+    `, 'user', isModeratorRole(session.profile?.role), session.profile?.notificationCount ?? 0);
   }
   const inner = `
     <section class="card">
@@ -91,7 +92,7 @@ export function renderUser(ctx: ViewContext): string {
       </div>
     </section>
   `;
-  return appShell(inner, 'user', isModeratorRole(session.profile?.role));
+  return appShell(inner, 'user', isModeratorRole(session.profile?.role), session.profile?.notificationCount ?? 0);
 }
 
 export function mountUser(root: HTMLElement, ctx: ViewContext): void {
