@@ -558,6 +558,44 @@ select.field__input {
   transform: scale(1.15);
 }
 
+.share-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.share-toggle__icon {
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--color-muted);
+  transition: color 0.15s ease, transform 0.15s ease;
+}
+
+.share-toggle:hover:not(:disabled) .share-toggle__icon {
+  color: var(--color-accent);
+}
+
+.share-toggle__count {
+  font-variant-numeric: tabular-nums;
+}
+
+.share-toggle__label {
+  font-size: 0.8em;
+}
+
+.share-toggle--active {
+  border-color: rgba(72, 149, 239, 0.5);
+}
+
+.share-toggle--active .share-toggle__icon {
+  color: var(--color-accent);
+  transform: scale(1.15);
+}
+
+.share-toggle--active .share-toggle__label {
+  color: var(--color-accent);
+}
+
 /* ------------------------------------------------------------
    Signalements (formulaire de signalement d'un contenu)
    ------------------------------------------------------------ */

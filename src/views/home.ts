@@ -3,6 +3,7 @@ import { notify } from '../lib/notify';
 import { createTextPost, fetchFeed, type Post, type PostVisibility } from '../lib/posts';
 import { createComment, fetchComments, fetchAuthorNames, type Comment } from '../lib/comments';
 import { fetchLikedPostIds, toggleLike } from '../lib/likes';
+import { fetchSharedPostIds, toggleShare } from '../lib/shares';
 import {
   createReport,
   hasReported,
@@ -173,6 +174,17 @@ function postMarkup(post: Post, uid: string): string {
       <span class="like-toggle__count" aria-label="Nombre de j’aime">${Number(post.likeCount) || 0}</span>
     </button>
   `;
+  const shareButton = `
+    <button type="button" class="btn btn--ghost btn--sm share-toggle"
+      data-share-toggle="${escapeHtml(post.id)}"
+      data-shared="false"
+      aria-pressed="false"
+      aria-label="Partager ou retirer le partage de cette publication">
+      <span class="share-toggle__icon" aria-hidden="true">↗</span>
+      <span class="share-toggle__count" aria-label="Nombre de partages">${Number(post.shareCount) || 0}</span>
+      <span class="share-toggle__label">Partager</span>
+    </button>
+  `;
   return `
     <article class="post-card">
       <header class="post-card__header">
@@ -186,6 +198,7 @@ function postMarkup(post: Post, uid: string): string {
       <p class="post-card__content">${escapeHtml(post.content)}</p>
       <div class="post-card__actions">
         ${likeButton}
+        ${shareButton}
         ${reportButton}
       </div>
       ${isOwn ? '' : reportPanelMarkup(post.id)}
@@ -324,6 +337,23 @@ export function mountHome(root: HTMLElement, ctx: ViewContext): void {
     });
   };
 
+  let sharedPostIds = new Set<string>();
+
+  const setShared = (btn: HTMLButtonElement, shared: boolean): void => {
+    btn.dataset.shared = String(shared);
+    btn.setAttribute('aria-pressed', String(shared));
+    btn.classList.toggle('share-toggle--active', shared);
+    const label = btn.querySelector<HTMLSpanElement>('.share-toggle__label');
+    if (label) label.textContent = shared ? 'Partagé' : 'Partager';
+  };
+
+  const applySharedState = (container: HTMLElement): void => {
+    container.querySelectorAll<HTMLButtonElement>('.share-toggle').forEach((btn) => {
+      const postId = btn.dataset.shareToggle;
+      setShared(btn, Boolean(postId && sharedPostIds.has(postId)));
+    });
+  };
+
   const attachLikeHandlers = (container: HTMLElement): void => {
     container.querySelectorAll<HTMLButtonElement>('.like-toggle').forEach((btn) => {
       const postId = btn.dataset.likeToggle;
@@ -357,6 +387,39 @@ export function mountHome(root: HTMLElement, ctx: ViewContext): void {
     });
   };
 
+  const attachShareHandlers = (container: HTMLElement): void => {
+    container.querySelectorAll<HTMLButtonElement>('.share-toggle').forEach((btn) => {
+      const postId = btn.dataset.shareToggle;
+      if (!postId) return;
+
+      btn.addEventListener('click', async () => {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        const wasShared = btn.dataset.shared === 'true';
+        const countEl = btn.querySelector<HTMLSpanElement>('.share-toggle__count');
+        const currentCount = countEl ? Number(countEl.textContent ?? '0') : 0;
+        const nextShared = !wasShared;
+
+        // Mise à jour optimiste : l'état réel reste garanti par les
+        // règles (doublon = update refusé, suppression = propriétaire).
+        setShared(btn, nextShared);
+        if (countEl) countEl.textContent = String(Math.max(0, currentCount + (nextShared ? 1 : -1)));
+
+        try {
+          await toggleShare(uid, postId);
+          if (nextShared) sharedPostIds.add(postId);
+          else sharedPostIds.delete(postId);
+        } catch (err) {
+          setShared(btn, wasShared);
+          if (countEl) countEl.textContent = String(currentCount);
+          notify(describeError(err), 'error');
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+  };
+
   const form = root.querySelector<HTMLFormElement>('#post-form');
   const feed = root.querySelector<HTMLDivElement>('#post-feed');
   const alerts = root.querySelector<HTMLDivElement>('#post-alerts');
@@ -374,8 +437,15 @@ export function mountHome(root: HTMLElement, ctx: ViewContext): void {
       } catch {
         likedPostIds = new Set();
       }
+      try {
+        sharedPostIds = await fetchSharedPostIds(uid);
+      } catch {
+        sharedPostIds = new Set();
+      }
       applyLikedState(feed);
       attachLikeHandlers(feed);
+      applySharedState(feed);
+      attachShareHandlers(feed);
       attachCommentsHandlers(root);
       attachReportHandlers(root);
     } catch (err) {

@@ -39,6 +39,7 @@ export interface Post {
   moderationStatus: string;
   likeCount: number;
   commentCount: number;
+  shareCount: number;
   createdAt: Date | null;
   updatedAt: Date | null;
   deletedAt: Date | null;
@@ -59,6 +60,7 @@ function snapshotToPost(snap: QueryDocumentSnapshot): Post {
     moderationStatus: data.moderationStatus ?? 'visible',
     likeCount: typeof data.likeCount === 'number' ? data.likeCount : 0,
     commentCount: typeof data.commentCount === 'number' ? data.commentCount : 0,
+    shareCount: typeof data.shareCount === 'number' ? data.shareCount : 0,
     createdAt: data.createdAt?.toDate?.() ?? null,
     updatedAt: data.updatedAt?.toDate?.() ?? null,
     deletedAt: data.deletedAt?.toDate?.() ?? null,

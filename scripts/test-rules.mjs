@@ -1,5 +1,5 @@
 // ============================================================
-// PAROLE - Suite de tests de sécurité (Phase 1 + Phase 3 + Phase 4)
+// PAROLE - Suite de tests de sécurité (Phase 1 + Phase 3 à Phase 6)
 // Exécution : npm run test:rules
 //   -> firebase emulators:exec --only firestore,storage "node scripts/test-rules.mjs"
 //
@@ -19,6 +19,10 @@
 // aux Cloud Functions, lecture destinataire/admin uniquement, champ
 // users.notificationCount verrouillé, marquage non lue -> lue strict
 // et idempotent, notification déjà lue immuable.
+// Phase 6 : bloc J (partage/renvoi) — déduplication par identifiant
+// déterministe, cible lisible, immuabilité, retrait réservé au shareur,
+// requête « mes partages », compteur posts.shareCount jamais modifiable
+// par un client, aucun compteur users.shareCount.
 // ============================================================
 
 import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
@@ -114,6 +118,10 @@ function report(reporterId, targetType, targetId, reason = 'harassment', status 
 }
 
 function like(userId, postId, extra = {}) {
+  return { userId, postId, createdAt: T.createdAt, updatedAt: T.createdAt, ...extra };
+}
+
+function share(userId, postId, extra = {}) {
   return { userId, postId, createdAt: T.createdAt, updatedAt: T.createdAt, ...extra };
 }
 
@@ -782,6 +790,86 @@ test('I18 read=true sans readAt REFUS', async () => {
 });
 test('I19 Création d’un profil avec notificationCount non nul REFUS', async () => {
   await expectDenied(setDoc(doc(zoe().firestore(), 'users', 'zoe9'), user('zoe9', 'user', { notificationCount: 5 })));
+});
+
+// ============================================================
+// J. Partage / renvoi de publications (Phase 6)
+// Collection `shares` : ID DÉTERMINISTE `shareId = ${userId}_${postId}`
+// (imposé par la règle de création -> un second partage est un update
+// -> refusé). Document IMMUABLE (pas d'update). Lecture : tout
+// utilisateur connecté. Création : canAct() + userId == auth.uid +
+// post cible lisible (isPostReadable). Suppression : réservée au
+// shareur. Le compteur posts.shareCount est maintenu UNIQUEMENT par
+// les Cloud Functions (onShareCreated / onShareDeleted) — jamais
+// modifiable par un client. Aucun compteur users.shareCount.
+// ============================================================
+test('J1  Non-auth : création de partage REFUS', async () => {
+  await expectDenied(setDoc(doc(anon().firestore(), 'shares', 'anon_post6'), share('anon', 'post6')));
+});
+test('J2  Non-auth : lecture d’un partage REFUS', async () => {
+  await expectDenied(getDoc(doc(anon().firestore(), 'shares', 'eve_post5')));
+});
+test('J3  Partage sur un post public OK', async () => {
+  await expectAllowed(setDoc(doc(eve().firestore(), 'shares', 'eve_post5'), share('eve', 'post5')));
+});
+test('J4  Partage sur un post masqué REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'shares', 'eve_post4'), share('eve', 'post4')));
+});
+test('J5  Partage sur un post followers (non suiveur) REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'shares', 'eve_post2'), share('eve', 'post2')));
+});
+test('J6  Partage sur un post privé d’autrui REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'shares', 'eve_post3'), share('eve', 'post3')));
+});
+test('J7  Partage avec un ID de document incohérent REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'shares', 'wrong_post5'), share('eve', 'post5')));
+});
+test('J8  Partage avec userId tiers REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'shares', 'bob_post5'), share('bob', 'post5')));
+});
+test('J9  Partage sur un post inexistant REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'shares', 'eve_ghost'), share('eve', 'ghost')));
+});
+test('J10 Partage dupliqué (même cible) REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'shares', 'eve_post5'), share('eve', 'post5')));
+});
+test('J11 Modification d’un partage REFUS (immuable)', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'shares', 'eve_post5'), { updatedAt: new Date() }));
+});
+test('J12 Un partage est lisible par les autres utilisateurs connectés OK', async () => {
+  await expectAllowed(getDoc(doc(alice().firestore(), 'shares', 'eve_post5')));
+});
+test('J13 Requête « mes partages » (where userId) OK', async () => {
+  const snap = await getDocs(
+    query(collection(eve().firestore(), 'shares'), where('userId', '==', 'eve'))
+  );
+  const ids = snap.docs.map((d) => d.id);
+  if (!ids.includes('eve_post5')) {
+    throw new Error(`La requête « mes partages » devrait contenir eve_post5 : ${ids.join(', ')}`);
+  }
+});
+test('J14 Partage avec un champ supplémentaire REFUS (hasOnly)', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'shares', 'eve_post1'), share('eve', 'post1', { extra: true })));
+});
+test('J15 L’auteur peut partager son propre post privé OK', async () => {
+  await expectAllowed(setDoc(doc(alice().firestore(), 'shares', 'alice_post3'), share('alice', 'post3')));
+});
+test('J16 Suppression du partage d’un autre REFUS', async () => {
+  await expectAllowed(setDoc(doc(charlie().firestore(), 'shares', 'charlie_post6'), share('charlie', 'post6')));
+  await expectDenied(deleteDoc(doc(eve().firestore(), 'shares', 'charlie_post6')));
+});
+test('J17 L’auteur supprime son propre partage OK', async () => {
+  await expectAllowed(deleteDoc(doc(eve().firestore(), 'shares', 'eve_post5')));
+});
+test('J18 Utilisateur sans profil ne peut pas partager', async () => {
+  const nog = () => testEnv.authenticatedContext('nog');
+  await expectDenied(setDoc(doc(nog().firestore(), 'shares', 'nog_post1'), share('nog', 'post1')));
+});
+test('J19 Un client ne peut pas modifier posts.shareCount REFUS', async () => {
+  await expectDenied(updateDoc(doc(alice().firestore(), 'posts', 'post1'), { shareCount: 5 }));
+});
+test('J20 Un client ne peut pas modifier users.shareCount (champ inexistant) REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'users', 'eve'), { shareCount: 5 }));
 });
 
 // ============================================================

@@ -10,7 +10,7 @@ import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import * as logger from 'firebase-functions/logger';
 
 // ============================================================
-// PAROLE - Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5)
+// PAROLE - Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6)
 //
 // Phase 1 : les données sensibles (role, banned, statuts de
 // modération, compteurs système, résolutions de signalements,
@@ -40,6 +40,13 @@ import * as logger from 'firebase-functions/logger';
 // `onNotificationCreated` (+1), `onNotificationUpdated` (-1
 // idempotent au passage non-lue -> lue) et `onNotificationDeleted`
 // (-1 défensif).
+//
+// Phase 6 : `onShareCreated` / `onShareDeleted` maintiennent
+// `posts.shareCount` (+1/-1) à chaque création/suppression d'un
+// partage (collection `shares`, ID déterministe `{userId}_{postId}`,
+// documents immuables). Aucun compteur `users.shareCount`. Une
+// notification de type `share` est créée au propriétaire du post
+// partagé (jamais pour un self-share).
 // ============================================================
 
 initializeApp();
@@ -102,7 +109,7 @@ async function logAudit(
 // créer, ni les supprimer (règles Firestore). Champs STRICTEMENT
 // présents à chaque création. Aucune notification à soi-même.
 // ------------------------------------------------------------
-const NOTIFICATION_TYPES = ['like', 'comment', 'follow'] as const;
+const NOTIFICATION_TYPES = ['like', 'comment', 'follow', 'share'] as const;
 type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
 async function createNotification(params: {
@@ -604,6 +611,54 @@ export const onLikeDeleted = onDocumentDeleted('likes/{likeId}', async (event) =
 
   await batch.commit();
   logger.info(`Like removed from post ${postId}`);
+});
+
+// ------------------------------------------------------------
+// Compteurs de partages (Phase 6)
+// onShareCreated  : +1 posts/{postId}.shareCount et notification
+//                   « share » au propriétaire du post partagé
+//                   (jamais pour un self-share — createNotification
+//                   refuse déjà actorId == recipientId).
+// onShareDeleted  : -1 posts/{postId}.shareCount.
+// Le client ne peut JAMAIS écrire ce compteur : seule l'existence
+// du partage (création/suppression, encadrée par les règles Firestore
+// — ID déterministe, document immuable, cible lisible, canAct())
+// déclenche la mise à jour via l'Admin SDK. Aucun compteur
+// users.shareCount.
+// ------------------------------------------------------------
+export const onShareCreated = onDocumentCreated('shares/{shareId}', async (event) => {
+  const data = event.data?.data();
+  const postId = data?.postId as string | undefined;
+  const sharerId = data?.userId as string | undefined;
+  if (!postId) {
+    return;
+  }
+
+  const postSnap = await db.doc(`posts/${postId}`).get();
+  if (!postSnap.exists) {
+    return;
+  }
+  await postSnap.ref.update({ shareCount: FieldValue.increment(1) });
+
+  // Notification au propriétaire du post (jamais pour un self-share).
+  const authorId = postSnap.data()?.authorId as string | undefined;
+  if (authorId && sharerId) {
+    await createNotification({ recipientId: authorId, actorId: sharerId, type: 'share', postId });
+  }
+  logger.info(`Share registered on post ${postId}`);
+});
+
+export const onShareDeleted = onDocumentDeleted('shares/{shareId}', async (event) => {
+  const postId = event.data?.data()?.postId as string | undefined;
+  if (!postId) {
+    return;
+  }
+  const postSnap = await db.doc(`posts/${postId}`).get();
+  if (!postSnap.exists) {
+    return;
+  }
+  await postSnap.ref.update({ shareCount: FieldValue.increment(-1) });
+  logger.info(`Share removed from post ${postId}`);
 });
 
 // ------------------------------------------------------------

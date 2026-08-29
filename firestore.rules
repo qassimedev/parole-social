@@ -1,7 +1,7 @@
 rules_version = '2';
 service cloud.firestore {
   // ============================================================
-  // PAROLE - Règles Firestore (Phase 1 + Phase 4 : Follow)
+  // PAROLE - Règles Firestore (Phase 1 à Phase 6)
   // PRINCIPE ABSOLU : DENY BY DEFAULT.
   //   - Aucune lecture/écriture sans règle explicite.
   //   - Un utilisateur ne peut modifier que ses propres données.
@@ -251,6 +251,43 @@ service cloud.firestore {
       allow update: if false;
 
       // Retrait d'un like : uniquement son auteur.
+      allow delete: if isOwner(resource.data.userId);
+    }
+
+    // ----------------------------------------------------------
+    // shares/{shareId} (Phase 6)
+    // Partage / renvoi d'une publication. DÉDUPLICATION par ID
+    // déterministe `shareId = ${userId}_${postId}` (imposé par la
+    // règle de création). Un second partage est un setDoc sur un
+    // document existant -> UPDATE -> refusé. Un partage est IMMUABLE.
+    // Les compteurs (posts.shareCount) sont maintenus par les Cloud
+    // Functions (onShareCreated / onShareDeleted) — jamais par un
+    // client. Aucun compteur users.shareCount (un partage n'est pas
+    // un indicateur valorisé du profil). Lecture : tout utilisateur
+    // connecté (requête « mes partages » mono-champ, aucun index
+    // composite).
+    // ----------------------------------------------------------
+    match /shares/{shareId} {
+      allow read: if isSignedIn();
+
+      allow create: if canAct()
+        && request.resource.data.userId == request.auth.uid
+        && shareId == request.auth.uid + '_' + request.resource.data.postId
+        && 'postId' in request.resource.data
+        && request.resource.data.postId is string
+        && request.resource.data.postId.size() > 0
+        && isPostReadable(request.resource.data.postId)
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.keys().hasOnly([
+          'userId', 'postId', 'createdAt', 'updatedAt'
+        ]);
+
+      // Un partage est immuable : on partage ou on retire, jamais de
+      // modification.
+      allow update: if false;
+
+      // Retrait d'un partage : uniquement son auteur.
       allow delete: if isOwner(resource.data.userId);
     }
 

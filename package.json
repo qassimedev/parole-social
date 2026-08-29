@@ -13,7 +13,7 @@
     "emulators": "firebase emulators:start",
     "emulators:export": "firebase emulators:export ./emulator-data",
     "test:rules": "firebase emulators:exec --only firestore,storage \"node scripts/test-rules.mjs\"",
-    "test:functions": "npm run build:functions && firebase emulators:exec --only auth,firestore,functions \"node scripts/test-functions.mjs\"",
+    "test:functions": "npm run build:functions && set FUNCTIONS_DISCOVERY_TIMEOUT=30&& firebase emulators:exec --only auth,firestore,functions \"node scripts/test-functions.mjs\"",
     "test:all": "npm run test:rules && npm run test:functions"
   },
   "devDependencies": {

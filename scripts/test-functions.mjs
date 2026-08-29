@@ -1,5 +1,5 @@
 // ============================================================
-// PAROLE - Suite de tests des Cloud Functions (Phase 1 + Phase 2)
+// PAROLE - Suite de tests des Cloud Functions (Phase 1 + Phase 2 + Phase 6)
 // Exécution : npm run test:functions
 //   -> firebase emulators:exec --only auth,firestore,functions "node scripts/test-functions.mjs"
 //
@@ -18,6 +18,10 @@
 //     propriétaire concerné (jamais pour soi-même) ; onNotification
 //     Created/Updated/Deleted maintiennent users.notificationCount
 //     (décrément idempotent au passage non lue -> lue).
+//   - Déclencheurs de partage/renvoi (Phase 6) : onShareCreated /
+//     onShareDeleted maintiennent posts.shareCount (+1/-1), sans
+//     aucun compteur users.shareCount, et créent une notification
+//     « share » au propriétaire du post (jamais pour un self-share).
 //   - Callable moderatePost : masquer/rétablir/maintenir/retirer un
 //     post, résoudre les signalements, tracer dans auditLogs.
 //   - Callable sanctionUser : warn/ban/unban/setRole + auditLogs.
@@ -125,6 +129,17 @@ function seedPost(authorId, overrides = {}) {
     updatedAt: T.updatedAt,
     ...overrides,
   });
+}
+
+// Partage (Phase 6) : ID déterministe `{userId}_{postId}` — le champ
+// posts.shareCount est maintenu par onShareCreated/onShareDeleted.
+function shareDoc(userId, postId) {
+  return {
+    userId,
+    postId,
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  };
 }
 
 async function expectCallableError(promise, code) {
@@ -591,6 +606,100 @@ test('T14 onNotificationUpdated : marquage lu → -1, et idempotence', async () 
   const snap = await db.doc('users/recipient14').get();
   if (snap.data()?.notificationCount !== 0) {
     throw new Error(`notificationCount devrait rester 0 après re-marquage, obtenu ${snap.data()?.notificationCount}`);
+  }
+});
+
+// ------------------------------------------------------------
+// Partage / renvoi (Phase 6)
+// posts.shareCount est maintenu par onShareCreated (+1) et
+// onShareDeleted (-1). Aucun compteur users.shareCount. Une
+// notification de type « share » est créée au propriétaire du post
+// partagé, jamais pour un self-share.
+// ------------------------------------------------------------
+test('S1  onShareCreated : post.shareCount incrémenté', async () => {
+  await seedProfile('sharer1', 'user');
+  await seedProfile('ownerS1', 'user');
+
+  const postRef = await seedPost('ownerS1');
+  const postId = postRef.id;
+
+  await db.collection('shares').doc(`sharer1_${postId}`).set(shareDoc('sharer1', postId));
+
+  await waitFor(async () => {
+    const snap = await postRef.get();
+    return snap.data()?.shareCount === 1;
+  });
+  // Aucun users.shareCount : seul posts.shareCount existe.
+  const owner = await db.doc('users/ownerS1').get();
+  if (owner.data()?.shareCount !== undefined) {
+    throw new Error('users.shareCount ne doit pas exister.');
+  }
+});
+
+test('S2  onShareDeleted : post.shareCount décrémenté', async () => {
+  await seedProfile('unsharer', 'user');
+  await seedProfile('ownerS2', 'user');
+
+  const postRef = await seedPost('ownerS2');
+  const postId = postRef.id;
+  const shareRef = db.collection('shares').doc(`unsharer_${postId}`);
+
+  await shareRef.set(shareDoc('unsharer', postId));
+  await waitFor(async () => {
+    const snap = await postRef.get();
+    return snap.data()?.shareCount === 1;
+  });
+
+  await shareRef.delete();
+  await waitFor(async () => {
+    const snap = await postRef.get();
+    return snap.data()?.shareCount === 0;
+  });
+});
+
+test('S3  onShareCreated : notification « share » créée pour le propriétaire du post', async () => {
+  await seedProfile('sharer3', 'user');
+  await seedProfile('ownerS3', 'user');
+
+  const postRef = await seedPost('ownerS3');
+  const postId = postRef.id;
+
+  await db.collection('shares').doc(`sharer3_${postId}`).set(shareDoc('sharer3', postId));
+
+  const notifications = await waitFor(async () => {
+    const snap = await db.collection('notifications').where('postId', '==', postId).get();
+    const shareDocs = snap.docs.filter((d) => d.data().type === 'share' && d.data().actorId === 'sharer3');
+    return shareDocs.length > 0 ? shareDocs : null;
+  });
+  const n = notifications[0].data();
+  if (n.recipientId !== 'ownerS3' || n.actorId !== 'sharer3' || n.type !== 'share') {
+    throw new Error(`Notification share incohérente : ${JSON.stringify(n)}`);
+  }
+  if (n.postId !== postId || n.commentId !== '' || n.read !== false || n.readAt !== null) {
+    throw new Error(`Schéma de notification incohérent : ${JSON.stringify(n)}`);
+  }
+  if (!n.createdAt) {
+    throw new Error('createdAt devrait être renseigné.');
+  }
+});
+
+test('S4  onShareCreated : partage de son propre post → aucune notification', async () => {
+  await seedProfile('ownerS4', 'user');
+
+  const postRef = await seedPost('ownerS4');
+  const postId = postRef.id;
+
+  await db.collection('shares').doc(`ownerS4_${postId}`).set(shareDoc('ownerS4', postId));
+
+  // shareCount incrémenté à la fin de onShareCreated : garantit son exécution.
+  await waitFor(async () => {
+    const snap = await postRef.get();
+    return snap.data()?.shareCount === 1;
+  });
+  await sleep(1000);
+  const snap = await db.collection('notifications').where('postId', '==', postId).get();
+  if (snap.size > 0) {
+    throw new Error('Aucune notification ne devrait exister pour un partage de son propre post.');
   }
 });
 

@@ -37,7 +37,7 @@ avec une décision traçable et susceptible d'appel.
   par les Cloud Functions, self-follow interdit, cible requise et non bannie,
   follow immuable, profil public (`#/u/{userId}`) avec bouton Suivre / Ne plus
   suivre (état optimiste).
-- **Phase 5** (en cours) : notifications — collection `notifications`
+- **Phase 5** (validée) : notifications — collection `notifications`
   (likes/commentaires/follows) créée **exclusivement** côté Cloud Functions
   (jamais pour soi-même), compteur `users.notificationCount` (non lues)
   maintenu par les triggers `onNotificationCreated/Updated/Deleted` (décrément
@@ -45,6 +45,13 @@ avec une décision traçable et susceptible d'appel.
   navigation alimenté exclusivement par `users.notificationCount`, marquage
   individuel ou global comme lu, règles strictes (lecture destinataire/admin,
   notification déjà lue immuable).
+- **Phase 6** (en cours) : partage / renvoi — collection `shares`
+  (déduplication par identifiant déterministe `shareId = ${userId}_${postId}`,
+  documents immuables), compteur `posts.shareCount` maintenu par les Cloud
+  Functions (`onShareCreated` / `onShareDeleted`), **aucun compteur
+  `users.shareCount`**, notification de type `share` au propriétaire du post
+  partagé (jamais pour soi-même), bouton Partager / Partagé avec état optimiste
+  dans le fil (miroir du like), compteur affiché sur les profils publics.
 
 ---
 
@@ -71,12 +78,16 @@ avec une décision traçable et susceptible d'appel.
 │ • users, posts, comments    │──▶│ • moderatePost              │
 │ • likes (dédupliqués)       │   │ • sanctionUser              │
 │ • follows (dédupliqués)     │   │ • onReportCreated (cnt)     │
-│ • reports (dédupliqués)     │   │ • onCommentCreated/Deleted  │
-│ • moderationQueue           │   │ • onLikeCreated/Deleted(cnt)│
-│ • notifications             │   │ • onFollowCreated/Deleted   │
-│ • auditLogs                 │   │   (cnt abonnements)         │
-│ Index composites minimaux   │   │ • onLike/Comment/Follow →   │
+│ • shares (dédupliqués)     │   │ • onCommentCreated/Deleted  │
+│ • reports (dédupliqués)     │   │ • onLikeCreated/Deleted(cnt)│
+│ • moderationQueue           │   │ • onFollowCreated/Deleted   │
+│ • notifications             │   │   (cnt abonnements)         │
+│ • auditLogs                 │   │ • onShareCreated/Deleted    │
+│ Index composites minimaux   │   │   (cnt `posts.shareCount`)  │
+│                             │   │ • onLike/Comment/Follow →   │
 │                             │   │   notification (Phase 5)    │
+│                             │   │ • onShare → notification    │
+│                             │   │   `share` (Phase 6)         │
 │                             │   │ • onNotificationCreated/    │
 │                             │   │   Updated/Deleted (cnt)     │
 │                             │   │ Écrit auditLogs (traçable)  │
@@ -161,6 +172,22 @@ suppression par l'auteur. `postId`/`authorId`/`moderationStatus` immuables côt�
   maintenus par `onFollowCreated` / `onFollowDeleted` — jamais écrits par un
   client.
 
+### shares/{shareId} (Phase 6)
+- **Déduplication** : `shareId = ${userId}_${postId}` — un utilisateur ne peut
+  partager un post qu'une seule fois (un second `setDoc` devient un `update`,
+  refusé). Un partage est **immuable** (pas de modification).
+- Champs : `userId`, `postId`, `createdAt`, `updatedAt`. Aucune donnée sensible.
+- Lecture : tout utilisateur connecté (permet la requête « mes partages » sur
+  `userId`, index mono-champ — aucun index composite requis).
+- Création : connecté, profil présent, non banni (`canAct()`), `userId ==
+  auth.uid`, et le post cible doit être lisible (`isPostReadable`). Retrait :
+  suppression réservée à son auteur.
+- Compteur `posts.shareCount` : maintenu **exclusivement** par `onShareCreated`
+  (+1) / `onShareDeleted` (−1). **Aucun compteur `users.shareCount`** — un
+  partage n'est pas un indicateur valorisé du profil (au contraire d'un like).
+- Notification de type `share` au propriétaire du post partagé, jamais pour un
+  self-share (géré par `createNotification`).
+
 ### reports/{reportId}
 - **Déduplication** : `reportId = ${reporterId}_${targetType}_${targetId}`.
   Un même utilisateur ne peut créer **qu'un seul** signalement par cible
@@ -181,14 +208,14 @@ suppression par l'auteur. `postId`/`authorId`/`moderationStatus` immuables côt�
   modérateur/admin, écriture Functions uniquement.
 
 ### notifications/{notificationId}
-Notifications de likes, commentaires et abonnements — **créées uniquement par
-les Cloud Functions** (aucune création/suppression client).
+Notifications de likes, commentaires, abonnements et partages — **créées
+uniquement par les Cloud Functions** (aucune création/suppression client).
 
 | Champ | Type | Description |
 |---|---|---|
 | recipientId | string | destinataire |
 | actorId | string | auteur de l'action |
-| type | `like` / `comment` / `follow` | nature de la notification |
+| type | `like` / `comment` / `follow` / `share` | nature de la notification |
 | postId | string | post concerné, `''` sinon |
 | commentId | string | commentaire concerné, `''` sinon |
 | read | boolean | `false` à la création |
@@ -215,6 +242,7 @@ Types de notifications (jamais pour soi-même) :
 - `like` : quelqu'un a aimé votre publication → propriétaire du post.
 - `comment` : quelqu'un a commenté votre publication → propriétaire du post.
 - `follow` : quelqu'un vous suit → utilisateur suivi.
+- `share` : quelqu'un a partagé votre publication → propriétaire du post.
 
 Page `#/notifications` : liste (chargement / vide / erreur + Réessayer), état
 lu/non lu, date, nom de l'acteur (lien `#/u/{actorId}`), bouton « Marquer comme
@@ -237,6 +265,7 @@ Journal append-only des actions administratives et de modération.
 |---|---|---|---|
 | Créer son profil / posts / commentaires / signalements | ✔ | ✔ | ✔ |
 | Liker / retirer son like | ✔ | ✔ | ✔ |
+| Partager / retirer son partage (Phase 6) | ✔ | ✔ | ✔ |
 | Suivre / ne plus suivre un utilisateur | ✔ | ✔ | ✔ |
 | Lire / marquer ses notifications | ✔ | ✔ | ✔ (admin : lit toutes) |
 | Modifier/supprimer ses propres contenus | ✔ | ✔ | ✔ |
@@ -264,7 +293,7 @@ modération, les compteurs système, les décisions de modération, les
 - Lecture des médias de posts conditionnée à la visibilité du post Firestore
   (`firestore.get` / `firestore.exists`) : un post masqué = médias illisibles.
 
-## Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5)
+## Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6)
 
 | Fonction | Type | Rôle requis | Effet |
 |---|---|---|---|
@@ -278,6 +307,8 @@ modération, les compteurs système, les décisions de modération, les
 | `onLikeDeleted` (Phase 3) | trigger | — | décrémente `post.likeCount` et `users.likeCount` (likes reçus) |
 | `onFollowCreated` (Phase 4) | trigger | — | incrémente `users.followingCount` (suiveur) et `users.followerCount` (suivi) + notification « follow » au suivi |
 | `onFollowDeleted` (Phase 4) | trigger | — | décrémente `users.followingCount` (suiveur) et `users.followerCount` (suivi) |
+| `onShareCreated` (Phase 6) | trigger | — | incrémente `post.shareCount` (+1) + notification « share » au propriétaire du post (jamais pour un self-share) |
+| `onShareDeleted` (Phase 6) | trigger | — | décrémente `post.shareCount` (−1) |
 | `onNotificationCreated` (Phase 5) | trigger | — | incrémente `users.notificationCount` (+1) pour une notification non lue |
 | `onNotificationUpdated` (Phase 5) | trigger | — | décrémente `users.notificationCount` (−1) au passage **exact** non lue → lue (idempotent, borné à ≥ 0) |
 | `onNotificationDeleted` (Phase 5) | trigger | — | décrément défensif (−1) si une notification **non lue** est supprimée (borné à ≥ 0) |
@@ -297,6 +328,9 @@ Index composites minimaux (Phase 1), uniquement ceux réellement utilisés :
 | `reports` | `targetId` ASC, `status` ASC | `moderatePost` : signalements pendants d'un post |
 | `moderationQueue` | `status` ASC, `createdAt` DESC | file de modération par état (Phase 2/UI) |
 | `notifications` | `recipientId` ASC, `createdAt` DESC | page `#/notifications` : notifications du user, plus récentes d'abord (Phase 5) |
+
+La collection `shares` (Phase 6) n'ajoute **aucun index composite** : ses
+requêtes (« mes partages ») sont des `where userId` mono-champ.
 
 Les index nécessaires aux phases suivantes (flux, etc.) seront ajoutés au fil
 de l'eau — pas par anticipation.
@@ -320,8 +354,8 @@ Ouvrir l'UI des émulateurs : http://localhost:4000
 npm run typecheck      # vérification TypeScript (frontend)
 npm run build          # build frontend
 npm run build:functions
-npm run test:rules     # tests de sécurité Firestore + Storage (155 tests, émulateurs)
-npm run test:functions # tests des Cloud Functions (23 tests, émulateurs)
+npm run test:rules     # tests de sécurité Firestore + Storage (175 tests, émulateurs)
+npm run test:functions # tests des Cloud Functions (27 tests, émulateurs)
 npm run test:all       # tout
 ```
 
@@ -364,4 +398,4 @@ firebase.json         # Configuration émulateurs / hosting
 
 La construction est progressive : architecture et sécurité (Phase 1), puis
 authentification, base de données, interface, publications, interactions
-(likes, suivis), signalements, modération, notifications, déploiement.
+(likes, partages, suivis), signalements, modération, notifications, déploiement.

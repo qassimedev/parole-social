@@ -57,10 +57,12 @@ function snapshotToProfile(data: DocumentData): UserProfile {
 function postMarkup(post: Post): string {
   const date =
     post.createdAt?.toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' }) ?? '—';
+  const shareCount = Number(post.shareCount) || 0;
   return `
     <article class="post-card post-card--compact">
       <p class="post-card__content">${escapeHtml(post.content)}</p>
       <span class="post-card__date muted">${escapeHtml(date)}</span>
+      ${shareCount > 0 ? `<span class="post-card__shares muted">${shareCount} partage${shareCount > 1 ? 's' : ''}</span>` : ''}
     </article>
   `;
 }

@@ -37,6 +37,8 @@ function notificationText(notification: AppNotification, actorName: string): str
       return `${actorName} a commenté votre publication.`;
     case 'follow':
       return `${actorName} vous suit maintenant.`;
+    case 'share':
+      return `${actorName} a partagé votre publication.`;
   }
 }
 
