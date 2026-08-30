@@ -99,6 +99,7 @@ export function appShell(
           ${link('home', '#/', 'Accueil')}
           ${messagesLink}
           ${notificationsLink}
+          ${link('appeals', '#/appeals', 'Recours')}
           ${link('profile', '#/profile', 'Profil')}
           ${link('settings', '#/settings', 'Paramètres')}
           ${canModerate ? link('moderation', '#/moderation', 'Modération') : ''}

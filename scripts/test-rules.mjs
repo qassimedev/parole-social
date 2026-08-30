@@ -52,6 +52,17 @@
 // non banni, déjà-lu immuable, modérateur sans passe-droit, aucune
 // suppression ni édition ; messageCount verrouillé à la création du
 // profil).
+// Phase 9 : bloc Q (Recours, Lot 4) — collection appeals/{appealId} à
+// ID DÉTERMINISTE `${appellantId}_${targetType}_${targetId}`. Création :
+// canAct + appellantId == auth.uid + cible APPARTENANT à l'appelant +
+// cible RÉELLEMENT sanctionnée + sanctionType cohérent (évalué par
+// lecture de l'état réel via exist()/get()) + reason 1..2000 +
+// status == 'pending' + createdAt timestamp + hasOnly strict. Lecture :
+// appelant concerné OU modérateur/admin — requêtes bornées « mes recours »
+// (appellantId) et « recours à traiter » (status == 'pending'), aucune
+// énumération. UPDATE/DELETE toujours refusés (y compris modérateur/admin) :
+// le document est immuable côté client, la résolution passe exclusivement
+// par la Cloud Function `reviewAppeal`.
 // ============================================================
 
 import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
@@ -243,6 +254,25 @@ function messageDoc(conversationId, senderId, content, extra = {}) {
   };
 }
 
+// Recours au schéma strict (Phase 9 - Lot 4). `appealId` est
+// DÉTERMINISTE : `${appellantId}_${targetType}_${targetId}` — la règle
+// impose ce format ET la correspondance avec l'id du document. Un seul
+// champ mis en `extra` suffit à faire échouer le hasOnly.
+function appealDoc(appellantId, targetType, targetId, sanctionType, reason = 'Je conteste cette sanction.', extra = {}) {
+  const appealId = `${appellantId}_${targetType}_${targetId}`;
+  return {
+    appealId,
+    appellantId,
+    targetType,
+    targetId,
+    sanctionType,
+    reason,
+    status: 'pending',
+    createdAt: T.createdAt,
+    ...extra,
+  };
+}
+
 async function seed() {
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
@@ -327,8 +357,20 @@ async function seed() {
     await setDoc(doc(db, 'messages', 'm2'), messageDoc('alice_bob', 'bob', 'Hello Alice'));
     await setDoc(doc(db, 'messages', 'm3'), messageDoc('alice_bob', 'alice', 'Deuxieme message'));
     await setDoc(doc(db, 'messages', 'm4'), messageDoc('alice_eve', 'eve', 'Salut quantique'));
-    await setDoc(doc(db, 'messages', 'm_banned'), messageDoc('alice_bannedP', 'bannedP', 'Essai banni'));
     await setDoc(doc(db, 'messages', 'm_orphan'), messageDoc('no_conv', 'alice', 'Orphelin'));
+
+    // Recours (Phase 9 - Lot 4) : cibles RÉELLEMENT sanctionnées
+    // appartenant à dave (post/commentaire masqués ou retirés), une
+    // cible dave non sanctionnée, un utilisateur Averti (non banni) et
+    // un utilisateur BANNI + suspendu (ne peut PAS déposer un recours,
+    // canAct).
+    await setDoc(doc(db, 'posts', 'postQHidden'), post('dave', 'Dave', 'public', 'hidden'));
+    await setDoc(doc(db, 'posts', 'postQRemoved'), post('dave', 'Dave', 'public', 'removed'));
+    await setDoc(doc(db, 'posts', 'postQVisible'), post('dave', 'Dave', 'public', 'visible'));
+    await setDoc(doc(db, 'comments', 'cQHidden'), comment('post1', 'dave', 'Commentaire masqué', 'hidden'));
+    await setDoc(doc(db, 'comments', 'cQRemoved'), comment('post1', 'dave', 'Commentaire retiré', 'removed'));
+    await setDoc(doc(db, 'users', 'warnedQ'), user('warnedQ', 'user', { moderationStatus: 'warned' }));
+    await setDoc(doc(db, 'users', 'bannedQ'), user('bannedQ', 'user', { banned: true, moderationStatus: 'suspended' }));
   });
 }
 
@@ -338,6 +380,8 @@ const bob = () => testEnv.authenticatedContext('bob');
 const eve = () => testEnv.authenticatedContext('eve');
 const charlie = () => testEnv.authenticatedContext('charlie');
 const dave = () => testEnv.authenticatedContext('dave');
+const warnedQ = () => testEnv.authenticatedContext('warnedQ');
+const bannedQ = () => testEnv.authenticatedContext('bannedQ');
 const zoe = () => testEnv.authenticatedContext('zoe'); // profil non créé
 const mod = () => testEnv.authenticatedContext('mod');
 const admin = () => testEnv.authenticatedContext('admin');
@@ -1678,6 +1722,120 @@ test('U01 messageCount doit être 0 à la création du profil (absent ou pair RE
 });
 test('U02 L’utilisateur ne peut pas modifier messageCount REFUS (épinglé)', async () => {
   await expectDenied(updateDoc(doc(alice().firestore(), 'users', 'alice'), { messageCount: 3 }));
+});
+
+// ============================================================
+// Phase 9 - Lot 4 : Recours (bloc Q)
+// ============================================================
+
+// --- CRÉATION ---
+test('Q01 Création valide : recours sur un post masqué (dave) OK', async () => {
+  await expectAllowed(setDoc(doc(dave().firestore(), 'appeals', 'dave_post_postQHidden'), appealDoc('dave', 'post', 'postQHidden', 'hidden')));
+});
+test('Q02 Création valide : recours sur un post retiré (dave) OK', async () => {
+  await expectAllowed(setDoc(doc(dave().firestore(), 'appeals', 'dave_post_postQRemoved'), appealDoc('dave', 'post', 'postQRemoved', 'removed')));
+});
+test('Q03 Création valide : recours sur un commentaire masqué (dave) OK', async () => {
+  await expectAllowed(setDoc(doc(dave().firestore(), 'appeals', 'dave_comment_cQHidden'), appealDoc('dave', 'comment', 'cQHidden', 'hidden')));
+});
+test('Q04 Création valide : recours sur un commentaire retiré (dave) OK', async () => {
+  await expectAllowed(setDoc(doc(dave().firestore(), 'appeals', 'dave_comment_cQRemoved'), appealDoc('dave', 'comment', 'cQRemoved', 'removed')));
+});
+test('Q05 Création valide : recours sur compte averti (warnedQ, lui-même) OK', async () => {
+  await expectAllowed(setDoc(doc(warnedQ().firestore(), 'appeals', 'warnedQ_user_warnedQ'), appealDoc('warnedQ', 'user', 'warnedQ', 'warned')));
+});
+test('Q06 Non-auth : création d’un recours REFUS', async () => {
+  await expectDenied(setDoc(doc(anon().firestore(), 'appeals', 'anon_post_postQHidden'), appealDoc('anon', 'post', 'postQHidden', 'hidden')));
+});
+test('Q07 Utilisateur non concerné : recours sur le post d’autrui REFUS', async () => {
+  await expectDenied(setDoc(doc(bob().firestore(), 'appeals', 'bob_post_postQHidden'), appealDoc('bob', 'post', 'postQHidden', 'hidden')));
+});
+test('Q08 Cible non sanctionnée (post visible de l’appelant) REFUS', async () => {
+  await expectDenied(setDoc(doc(dave().firestore(), 'appeals', 'dave_post_postQVisible'), appealDoc('dave', 'post', 'postQVisible', 'hidden')));
+});
+test('Q09 Recours « user pour autrui » (targetId ≠ auth.uid) REFUS', async () => {
+  await expectDenied(setDoc(doc(alice().firestore(), 'appeals', 'alice_user_bob'), appealDoc('alice', 'user', 'bob', 'warned')));
+});
+test('Q10 Utilisateur banni : dépôt de recours REFUS (canAct)', async () => {
+  await expectDenied(setDoc(doc(bannedQ().firestore(), 'appeals', 'bannedQ_user_bannedQ'), appealDoc('bannedQ', 'user', 'bannedQ', 'suspended')));
+});
+test('Q11 ID de document non déterministe REFUS', async () => {
+  await expectDenied(setDoc(doc(dave().firestore(), 'appeals', 'wrong_id'), appealDoc('dave', 'post', 'postQHidden', 'hidden')));
+});
+test('Q12 Champ appealId incohérent avec l’id du document REFUS', async () => {
+  await expectDenied(setDoc(doc(dave().firestore(), 'appeals', 'dave_post_postQHidden'), { ...appealDoc('dave', 'post', 'postQHidden', 'hidden'), appealId: 'dave_post_OTHER' }));
+});
+test('Q13 sanctionType incohérent avec l’état réel (post hidden déclaré removed) REFUS', async () => {
+  await expectDenied(setDoc(doc(dave().firestore(), 'appeals', 'dave2_post_postQHidden'), appealDoc('dave', 'post', 'postQHidden', 'removed')));
+});
+test('Q14 sanctionType non autorisé pour le type de cible (post avec warned) REFUS', async () => {
+  await expectDenied(setDoc(doc(dave().firestore(), 'appeals', 'dave2_post_postQRemoved'), appealDoc('dave', 'post', 'postQRemoved', 'warned')));
+});
+test('Q15 Raison vide REFUS', async () => {
+  await expectDenied(setDoc(doc(dave().firestore(), 'appeals', 'dave3_post_postQHidden'), appealDoc('dave', 'post', 'postQHidden', 'hidden', '')));
+});
+test('Q16 Raison > 2000 caractères REFUS', async () => {
+  await expectDenied(setDoc(doc(dave().firestore(), 'appeals', 'dave3_post_postQRemoved'), appealDoc('dave', 'post', 'postQRemoved', 'removed', 'x'.repeat(2001))));
+});
+test('Q17 status ≠ pending à la création REFUS', async () => {
+  await expectDenied(setDoc(doc(dave().firestore(), 'appeals', 'dave4_post_postQHidden'), appealDoc('dave', 'post', 'postQHidden', 'hidden', 'Raison', { status: 'accepted' })));
+});
+test('Q18 createdAt non-timestamp REFUS', async () => {
+  await expectDenied(setDoc(doc(dave().firestore(), 'appeals', 'dave4_post_postQRemoved'), appealDoc('dave', 'post', 'postQRemoved', 'removed', 'Raison', { createdAt: 'hier' })));
+});
+test('Q19 Champ parasite à la création REFUS (hasOnly)', async () => {
+  await expectDenied(setDoc(doc(dave().firestore(), 'appeals', 'dave5_post_postQHidden'), appealDoc('dave', 'post', 'postQHidden', 'hidden', 'Raison', { reviewedBy: 'mod' })));
+});
+test('Q20 Champ obligatoire manquant (status) REFUS', async () => {
+  const { status: _unused, ...withoutStatus } = appealDoc('dave', 'post', 'postQHidden', 'hidden');
+  await expectDenied(setDoc(doc(dave().firestore(), 'appeals', 'dave5_post_postQRemoved'), withoutStatus));
+});
+test('Q21 Doublon du même recours REFUS (second setDoc = update)', async () => {
+  await expectDenied(setDoc(doc(dave().firestore(), 'appeals', 'dave_post_postQHidden'), appealDoc('dave', 'post', 'postQHidden', 'hidden')));
+});
+test('Q22 Sans profil existant : dépôt de recours REFUS (canAct)', async () => {
+  const noProfile = () => testEnv.authenticatedContext('noprofileQ');
+  await expectDenied(setDoc(doc(noProfile().firestore(), 'appeals', 'noprofileQ_post_postQHidden'), appealDoc('noprofileQ', 'post', 'postQHidden', 'hidden')));
+});
+
+// --- LECTURE ---
+test('Q23 L’appelant lit son propre recours OK', async () => {
+  await expectAllowed(getDoc(doc(dave().firestore(), 'appeals', 'dave_post_postQHidden')));
+});
+test('Q24 Un tiers ne lit pas le recours REFUS (y compris un utilisateur banni)', async () => {
+  await expectDenied(getDoc(doc(bob().firestore(), 'appeals', 'dave_post_postQHidden')));
+  await expectDenied(getDoc(doc(bannedQ().firestore(), 'appeals', 'dave_post_postQHidden')));
+});
+test('Q25 Un modérateur lit le recours OK', async () => {
+  await expectAllowed(getDoc(doc(mod().firestore(), 'appeals', 'dave_post_postQHidden')));
+});
+test('Q26 Un administrateur lit le recours OK', async () => {
+  await expectAllowed(getDoc(doc(admin().firestore(), 'appeals', 'dave_post_postQHidden')));
+});
+test('Q27 Requête « mes recours » (where appellantId == dave) OK et bornée', async () => {
+  const snap = await getDocs(query(collection(dave().firestore(), 'appeals'), where('appellantId', '==', 'dave')));
+  if (snap.size < 2) throw new Error(`Attendu les recours de dave, obtenu ${snap.size}`);
+  snap.forEach((d) => {
+    if (d.data().appellantId !== 'dave') throw new Error('Fuite : recours d’un autre appelant.');
+  });
+});
+test('Q28 Requête « recours à traiter » (where status == pending) : modérateur OK, utilisateur REFUS', async () => {
+  const modSnap = await getDocs(query(collection(mod().firestore(), 'appeals'), where('status', '==', 'pending')));
+  if (modSnap.size < 1) throw new Error('Attendu au moins un recours en attente.');
+  await expectDenied(getDocs(query(collection(eve().firestore(), 'appeals'), where('status', '==', 'pending'))));
+});
+test('Q29 Énumération globale des recours par un utilisateur REFUS', async () => {
+  await expectDenied(getDocs(collection(eve().firestore(), 'appeals')));
+});
+
+// --- MODIFICATION / SUPPRESSION (document IMMUABLE côté client) ---
+test('Q30 Update direct par l’appelant REFUS (immuable)', async () => {
+  await expectDenied(updateDoc(doc(dave().firestore(), 'appeals', 'dave_post_postQHidden'), { status: 'accepted' }));
+});
+test('Q31 Update direct par modérateur/admin REFUS (résolution exclusive via reviewAppeal)', async () => {
+  await expectDenied(updateDoc(doc(mod().firestore(), 'appeals', 'dave_post_postQHidden'), { status: 'accepted' }));
+  await expectDenied(updateDoc(doc(admin().firestore(), 'appeals', 'dave_post_postQHidden'), { status: 'rejected' }));
+  await expectDenied(deleteDoc(doc(admin().firestore(), 'appeals', 'dave_post_postQHidden')));
 });
 
 // ============================================================

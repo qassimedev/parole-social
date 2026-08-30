@@ -22,6 +22,13 @@ import {
 import { getFunctionsInstance } from '../lib/firebase';
 import { httpsCallable } from 'firebase/functions';
 import {
+  APPEAL_STATUS_LABELS,
+  APPEAL_TARGET_LABELS,
+  fetchPendingAppeals,
+  SANCTION_TYPE_LABELS,
+  type Appeal,
+} from '../lib/appeals';
+import {
   appShell,
   alertMarkup,
   escapeHtml,
@@ -79,6 +86,17 @@ const sanctionUser = httpsCallable<
   SanctionResult
 >(functions, 'sanctionUser');
 
+interface ReviewAppealResult {
+  ok: boolean;
+  appealId: string;
+  decision: string;
+}
+
+const reviewAppeal = httpsCallable<
+  { appealId: string; decision: 'accepted' | 'rejected' },
+  ReviewAppealResult
+>(functions, 'reviewAppeal');
+
 function reportsStatusMarkup(): string {
   return `<div class="mod-reports__status">${spinnerMarkup()}<span class="muted">Chargement des signalements…</span></div>`;
 }
@@ -95,6 +113,55 @@ function reportsErrorMarkup(message: string): string {
         <span class="btn__label">Réessayer</span>
       </button>
     </div>
+  `;
+}
+
+function appealsStatusMarkup(): string {
+  return `<div class="mod-reports__status">${spinnerMarkup()}<span class="muted">Chargement des recours…</span></div>`;
+}
+
+function appealsEmptyMarkup(): string {
+  return `<p class="muted">Aucun recours en attente.</p>`;
+}
+
+function appealsErrorMarkup(message: string): string {
+  return `
+    <div class="mod-reports__error" role="alert">
+      <div class="alert alert--error">${escapeHtml(message)}</div>
+      <button type="button" id="mod-appeals-retry" class="btn btn--ghost btn--sm">
+        <span class="btn__label">Réessayer</span>
+      </button>
+    </div>
+  `;
+}
+
+function pendingAppealMarkup(appeal: Appeal): string {
+  const targetLabel = APPEAL_TARGET_LABELS[appeal.targetType] ?? appeal.targetType;
+  const sanctionLabel = SANCTION_TYPE_LABELS[appeal.sanctionType] ?? appeal.sanctionType;
+  const statusLabel = APPEAL_STATUS_LABELS[appeal.status] ?? appeal.status;
+  const date =
+    appeal.createdAt?.toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' }) ?? '—';
+  return `
+    <article class="report-item">
+      <div class="report-item__head">
+        <span class="badge">${escapeHtml(targetLabel)}</span>
+        <span class="badge">${escapeHtml(sanctionLabel)}</span>
+        <span class="badge badge--warn">${escapeHtml(statusLabel)}</span>
+        <span class="report-item__date muted">${escapeHtml(date)}</span>
+      </div>
+      <p class="report-item__reporter">Appelant : ${escapeHtml(appeal.appellantId)} · Cible : <code>${escapeHtml(appeal.targetId)}</code></p>
+      <p class="report-item__details">${escapeHtml(appeal.reason)}</p>
+      <div class="actions">
+        <button type="button" class="btn btn--primary btn--sm appeal-action"
+          data-appeal-id="${escapeHtml(appeal.appealId)}" data-decision="accepted">
+          <span class="btn__label">Accepter</span>
+        </button>
+        <button type="button" class="btn btn--danger btn--sm appeal-action"
+          data-appeal-id="${escapeHtml(appeal.appealId)}" data-decision="rejected">
+          <span class="btn__label">Rejeter</span>
+        </button>
+      </div>
+    </article>
   `;
 }
 
@@ -220,6 +287,17 @@ export function renderModeration(ctx: ViewContext): string {
     </section>
 
     <section class="card">
+      <h2 class="card__title">Recours</h2>
+      <p class="muted">
+        Recours contre les sanctions déposés par les utilisateurs. L’acceptation restaure la cible
+        (post/commentaire rendu visible, compte dé-sanctionné), le rejet la laisse sanctuarisée.
+        La décision passe par la Cloud Function <code>reviewAppeal</code> (rôle vérifié côté serveur,
+        tracée dans l’audit log) et notifie l’appelant.
+      </p>
+      <div id="mod-appeals">${appealsStatusMarkup()}</div>
+    </section>
+
+    <section class="card">
       <h2 class="card__title">Sanctions utilisateur</h2>
       <p class="muted">
         Les sanctions passent par la Cloud Function <code>sanctionUser</code> qui vérifie le rôle
@@ -324,6 +402,41 @@ export function mountModeration(root: HTMLElement, ctx: ViewContext): void {
     }
   };
 
+  const loadAppeals = async (): Promise<void> => {
+    const appealsEl = root.querySelector<HTMLDivElement>('#mod-appeals');
+    if (!appealsEl) return;
+    appealsEl.innerHTML = appealsStatusMarkup();
+    try {
+      const appeals = await fetchPendingAppeals();
+      if (appeals.length === 0) {
+        appealsEl.innerHTML = appealsEmptyMarkup();
+        return;
+      }
+      appealsEl.innerHTML = appeals.map(pendingAppealMarkup).join('\n');
+      appealsEl.querySelectorAll<HTMLButtonElement>('.appeal-action').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const appealId = btn.dataset.appealId;
+          const decision = btn.dataset.decision;
+          if (!appealId || (decision !== 'accepted' && decision !== 'rejected')) return;
+          btn.disabled = true;
+          try {
+            await reviewAppeal({ appealId, decision });
+            notify(decision === 'accepted' ? 'Recours accepté : cible restaurée.' : 'Recours rejeté.', 'success');
+            await loadAppeals();
+          } catch (err) {
+            notify(describeError(err), 'error');
+            await loadAppeals();
+          }
+        });
+      });
+    } catch (err) {
+      appealsEl.innerHTML = appealsErrorMarkup(describeError(err));
+      appealsEl.querySelector<HTMLButtonElement>('#mod-appeals-retry')?.addEventListener('click', () => {
+        void loadAppeals();
+      });
+    }
+  };
+
   const bindModerationActions = (container: HTMLElement, reload: () => Promise<void>): void => {
     container.querySelectorAll<HTMLButtonElement>('.mod-action').forEach((btn) => {
       btn.addEventListener('click', async () => {
@@ -403,4 +516,5 @@ export function mountModeration(root: HTMLElement, ctx: ViewContext): void {
   });
 
   void loadReports();
+  void loadAppeals();
 }

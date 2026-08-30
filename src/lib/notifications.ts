@@ -33,7 +33,7 @@ import {
   type DocumentData,
 } from 'firebase/firestore';
 
-export type NotificationType = 'like' | 'comment' | 'follow' | 'share' | 'reply' | 'message';
+export type NotificationType = 'like' | 'comment' | 'follow' | 'share' | 'reply' | 'message' | 'appeal';
 
 export interface AppNotification {
   id: string;
@@ -55,7 +55,7 @@ function toNotification(id: string, data: DocumentData): AppNotification {
     id,
     recipientId: typeof data.recipientId === 'string' ? data.recipientId : '',
     actorId: typeof data.actorId === 'string' ? data.actorId : '',
-    type: type === 'like' || type === 'comment' || type === 'follow' || type === 'share' || type === 'reply' || type === 'message' ? type : 'like',
+    type: type === 'like' || type === 'comment' || type === 'follow' || type === 'share' || type === 'reply' || type === 'message' || type === 'appeal' ? type : 'like',
     postId: typeof data.postId === 'string' ? data.postId : '',
     commentId: typeof data.commentId === 'string' ? data.commentId : '',
     read: data.read === true,

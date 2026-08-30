@@ -48,6 +48,8 @@ function parseHash(hash: string): Route {
     }
   } else if (segments[0] === 'moderation') {
     name = 'moderation';
+  } else if (segments[0] === 'appeals') {
+    name = 'appeals';
   } else {
     name = 'home';
   }

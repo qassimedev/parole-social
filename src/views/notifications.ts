@@ -44,6 +44,8 @@ function notificationText(notification: AppNotification, actorName: string): str
       return `${actorName} a répondu à votre commentaire.`;
     case 'message':
       return `${actorName} vous a envoyé un message.`;
+    case 'appeal':
+      return `Le statut de votre recours a été mis à jour.`;
   }
 }
 
@@ -71,7 +73,9 @@ function notificationItemMarkup(notification: AppNotification, actorName: string
       <p class="notification-item__text">${escapeHtml(notificationText(notification, actorName))}</p>
       ${notification.type === 'message'
         ? `<div class="notification-item__link"><a href="#/messages/${escapeHtml(buildConversationId(notification.recipientId, notification.actorId))}?peer=${escapeHtml(notification.actorId)}">Voir la conversation</a></div>`
-        : ''}
+        : notification.type === 'appeal'
+          ? `<div class="notification-item__link"><a href="#/appeals">Voir mes recours</a></div>`
+          : ''}
       <div class="notification-item__actions">${actionsMarkup}</div>
     </article>
   `;
@@ -156,7 +160,7 @@ export function mountNotifications(root: HTMLElement, ctx: ViewContext): void {
 
   const emptyMarkup = (): string => `
     <div class="notifications__empty muted">
-      Aucune notification pour le moment. Vos likes, commentaires, réponses, abonnements et messages arrivent ici.
+      Aucune notification pour le moment. Vos likes, commentaires, réponses, abonnements, messages et mises à jour de recours arrivent ici.
     </div>
   `;
 

@@ -33,6 +33,13 @@
 //   - Callable moderatePost : masquer/rétablir/maintenir/retirer un
 //     post, résoudre les signalements, tracer dans auditLogs.
 //   - Callable sanctionUser : warn/ban/unban/setRole + auditLogs.
+//   - Callable reviewAppeal (Phase 9 - Lot 4) : un modérateur/admin
+//     tranche un recours — 'accepted' restaure la cible (post/comment
+//     -> 'visible', user -> dé-sanction), 'rejected' ne restaure rien ;
+//     clôture traçable du recours (status + reviewedBy + reviewedAt),
+//     auditLogs, notification 'appeal' à l'appelant (jamais pour soi-
+//     même), idempotence (recours déjà résolu refusé), cible disparue
+//     -> not-found sans clôture, accès réservé modérateur/admin.
 //   - Refus d'accès pour les utilisateurs sans le rôle requis.
 //   - Callable registerUser (Phase 2) : inscription valide,
 //     refus d'un mot de passe faible, refus d'un email déjà
@@ -138,6 +145,40 @@ function seedPost(authorId, overrides = {}) {
     updatedAt: T.updatedAt,
     ...overrides,
   });
+}
+
+// Recours (Phase 9 - Lot 4) : doc écrit via Admin SDK (contourne les
+// règles, prudent aux appels) avec l'ID DÉTERMINISTE
+// `${appellantId}_${targetType}_${targetId}`. L'enforcement des règles
+// de création est couvert par le bloc Q de test-rules.mjs.
+async function seedAppeal(appellantId, targetType, targetId, sanctionType, reason = 'Je conteste cette sanction.') {
+  const appealId = `${appellantId}_${targetType}_${targetId}`;
+  await db.doc(`appeals/${appealId}`).set({
+    appealId,
+    appellantId,
+    targetType,
+    targetId,
+    sanctionType,
+    reason,
+    status: 'pending',
+    createdAt: T.createdAt,
+  });
+  return appealId;
+}
+
+async function seedComment(postId, authorId, content = 'Commentaire', overrides = {}) {
+  const ref = await db.collection('comments').add({
+    postId,
+    authorId,
+    content,
+    replyToId: '',
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+    moderationStatus: 'visible',
+    deletedAt: null,
+    ...overrides,
+  });
+  return ref;
 }
 
 // Partage (Phase 6) : ID déterministe `{userId}_{postId}` — le champ
@@ -1545,6 +1586,367 @@ test('MSG5 onMessageCreated : conversation mal formée → aucun effet (défensi
   if (!notifs.empty) {
     throw new Error('Aucune notification ne devrait être créée pour une conversation invalide.');
   }
+});
+
+// ------------------------------------------------------------
+// Phase 9 - Lot 4 : Recours (callable reviewAppeal) — bloc AP
+// ------------------------------------------------------------
+test('AP1  reviewAppeal (modérateur) : accepte un recours post → restauration + notification', async () => {
+  const modUid = await createAuthUser('apmod1@parole.test');
+  await seedProfile(modUid, 'moderator');
+  await seedProfile('apApp1', 'user');
+
+  const postRef = await seedPost('apApp1', { moderationStatus: 'hidden' });
+  const postId = postRef.id;
+  const appealId = await seedAppeal('apApp1', 'post', postId, 'hidden');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  const res = await callWithRetry(reviewAppeal, { appealId, decision: 'accepted' });
+  if (res.data.ok !== true || res.data.decision !== 'accepted') {
+    throw new Error(`Réponse inattendue : ${JSON.stringify(res.data)}`);
+  }
+
+  const post = (await postRef.get()).data();
+  if (post.moderationStatus !== 'visible') {
+    throw new Error(`Le post devrait être restauré (visible) : ${post.moderationStatus}`);
+  }
+  if (post.moderatorId !== modUid) {
+    throw new Error('moderatorId devrait être celui du modérateur qui accepte le recours.');
+  }
+
+  const appeal = (await db.doc(`appeals/${appealId}`).get()).data();
+  if (appeal.status !== 'accepted' || appeal.reviewedBy !== modUid || !appeal.reviewedAt) {
+    throw new Error(`Clôture du recours incohérente : ${JSON.stringify(appeal)}`);
+  }
+
+  await waitFor(async () => {
+    const snap = await db.collection('notifications').where('recipientId', '==', 'apApp1').where('type', '==', 'appeal').get();
+    return snap.size > 0;
+  });
+
+  await signOut(auth);
+});
+
+test('AP2  reviewAppeal (admin) : accepte un recours commentaire → restauration + trace', async () => {
+  const adminUid = await createAuthUser('apadmin2@parole.test');
+  await seedProfile(adminUid, 'admin');
+  await seedProfile('apApp2', 'user');
+
+  const postRef = await seedPost('apApp2');
+  const postId = postRef.id;
+  const commentRef = await seedComment(postId, 'apApp2', 'Commentaire masqué', { moderationStatus: 'hidden' });
+  const commentId = commentRef.id;
+  const appealId = await seedAppeal('apApp2', 'comment', commentId, 'hidden');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  const res = await callWithRetry(reviewAppeal, { appealId, decision: 'accepted' });
+  if (res.data.ok !== true || res.data.decision !== 'accepted') {
+    throw new Error(`Réponse inattendue : ${JSON.stringify(res.data)}`);
+  }
+
+  const comment = (await commentRef.get()).data();
+  if (comment.moderationStatus !== 'visible') {
+    throw new Error(`Le commentaire devrait être restauré (visible) : ${comment.moderationStatus}`);
+  }
+  if (comment.moderatorId !== adminUid || !comment.moderatedAt || !comment.updatedAt) {
+    throw new Error(`Trace de modération commentaire incohérente : ${JSON.stringify(comment)}`);
+  }
+
+  await waitFor(async () => {
+    const snap = await db.collection('auditLogs').where('targetId', '==', commentId).where('action', '==', 'appeal.accepted').get();
+    return snap.size > 0;
+  });
+
+  await signOut(auth);
+});
+
+test('AP3  reviewAppeal (utilisateur simple) : REFUS', async () => {
+  const userUid = await createAuthUser('apuser3@parole.test');
+  await seedProfile(userUid, 'user');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  await expectCallableError(reviewAppeal({ appealId: 'any', decision: 'accepted' }), 'permission-denied');
+
+  await signOut(auth);
+});
+
+test('AP4  reviewAppeal (non authentifié) : REFUS', async () => {
+  await createAuthUser('apuser4@parole.test'); // session puis déconnexion
+  await signOut(auth);
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  await expectCallableError(reviewAppeal({ appealId: 'any', decision: 'accepted' }), 'unauthenticated');
+});
+
+test('AP5  reviewAppeal : appealId manquant REFUS', async () => {
+  const modUid = await createAuthUser('apmod5@parole.test');
+  await seedProfile(modUid, 'moderator');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  await expectCallableError(reviewAppeal({ appealId: '', decision: 'accepted' }), 'invalid-argument');
+
+  await signOut(auth);
+});
+
+test('AP6  reviewAppeal : decision invalide REFUS', async () => {
+  const modUid = await createAuthUser('apmod6@parole.test');
+  await seedProfile(modUid, 'moderator');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  await expectCallableError(reviewAppeal({ appealId: 'x_post_y', decision: 'maybe' }), 'invalid-argument');
+
+  await signOut(auth);
+});
+
+test('AP7  reviewAppeal : recours inexistant → not-found', async () => {
+  const modUid = await createAuthUser('apmod7@parole.test');
+  await seedProfile(modUid, 'moderator');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  await expectCallableError(reviewAppeal({ appealId: 'ghost_post_ghost', decision: 'accepted' }), 'not-found');
+
+  await signOut(auth);
+});
+
+test('AP8  reviewAppeal : recours déjà accepté → failed-precondition (aucune double résolution)', async () => {
+  const modUid = await createAuthUser('apmod8@parole.test');
+  await seedProfile(modUid, 'moderator');
+  await seedProfile('apApp8', 'user');
+
+  const postRef = await seedPost('apApp8', { moderationStatus: 'hidden' });
+  const postId = postRef.id;
+  const appealId = await seedAppeal('apApp8', 'post', postId, 'hidden');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  await callWithRetry(reviewAppeal, { appealId, decision: 'accepted' });
+  await expectCallableError(reviewAppeal({ appealId, decision: 'accepted' }), 'failed-precondition');
+  await expectCallableError(reviewAppeal({ appealId, decision: 'rejected' }), 'failed-precondition');
+
+  await signOut(auth);
+});
+
+test('AP9  reviewAppeal : rejet, puis nouvelle décision → failed-precondition', async () => {
+  const modUid = await createAuthUser('apmod9@parole.test');
+  await seedProfile(modUid, 'moderator');
+  await seedProfile('apApp9', 'user');
+
+  const postRef = await seedPost('apApp9', { moderationStatus: 'hidden' });
+  const postId = postRef.id;
+  const appealId = await seedAppeal('apApp9', 'post', postId, 'hidden');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  const res = await callWithRetry(reviewAppeal, { appealId, decision: 'rejected' });
+  if (res.data.ok !== true || res.data.decision !== 'rejected') {
+    throw new Error(`Réponse inattendue : ${JSON.stringify(res.data)}`);
+  }
+  await expectCallableError(reviewAppeal({ appealId, decision: 'accepted' }), 'failed-precondition');
+
+  await signOut(auth);
+});
+
+test('AP10 reviewAppeal : cible disparue à l’acceptation → not-found, recours toujours pending', async () => {
+  const modUid = await createAuthUser('apmod10@parole.test');
+  await seedProfile(modUid, 'moderator');
+  await seedProfile('apApp10', 'user');
+
+  const postRef = await seedPost('apApp10', { moderationStatus: 'hidden' });
+  const postId = postRef.id;
+  const appealId = await seedAppeal('apApp10', 'post', postId, 'hidden');
+
+  await postRef.delete();
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  await expectCallableError(reviewAppeal({ appealId, decision: 'accepted' }), 'not-found');
+
+  const appeal = (await db.doc(`appeals/${appealId}`).get()).data();
+  if (appeal.status !== 'pending' || appeal.reviewedBy !== undefined) {
+    throw new Error(`Le recours devrait rester pending : ${JSON.stringify(appeal)}`);
+  }
+  const audit = await db.collection('auditLogs').where('targetId', '==', postId).get();
+  if (!audit.empty) {
+    throw new Error('Aucun audit ne devrait exister si la décision est annulée.');
+  }
+
+  await signOut(auth);
+});
+
+test('AP11 reviewAppeal : rejet → aucune restauration de la cible', async () => {
+  const modUid = await createAuthUser('apmod11@parole.test');
+  await seedProfile(modUid, 'moderator');
+  await seedProfile('apApp11', 'user');
+
+  const postRef = await seedPost('apApp11', { moderationStatus: 'hidden' });
+  const postId = postRef.id;
+  const appealId = await seedAppeal('apApp11', 'post', postId, 'hidden');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  await callWithRetry(reviewAppeal, { appealId, decision: 'rejected' });
+
+  const post = (await postRef.get()).data();
+  if (post.moderationStatus !== 'hidden') {
+    throw new Error(`La cible ne devrait PAS être restaurée sur rejet : ${post.moderationStatus}`);
+  }
+  const appeal = (await db.doc(`appeals/${appealId}`).get()).data();
+  if (appeal.status !== 'rejected' || appeal.reviewedBy !== modUid) {
+    throw new Error(`Clôture du recours incohérente : ${JSON.stringify(appeal)}`);
+  }
+
+  await waitFor(async () => {
+    const snap = await db.collection('auditLogs').where('targetId', '==', postId).where('action', '==', 'appeal.rejected').get();
+    return snap.size > 0;
+  });
+  await waitFor(async () => {
+    const snap = await db.collection('notifications').where('recipientId', '==', 'apApp11').where('type', '==', 'appeal').get();
+    return snap.size > 0;
+  });
+
+  await signOut(auth);
+});
+
+test('AP12 reviewAppeal : accepte un recours de compte averti → dé-sanction warn', async () => {
+  const modUid = await createAuthUser('apmod12@parole.test');
+  await seedProfile(modUid, 'moderator');
+  await seedProfile('apApp12', 'user');
+  await db.doc('users/apApp12').update({ moderationStatus: 'warned' });
+
+  const appealId = await seedAppeal('apApp12', 'user', 'apApp12', 'warned');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  const res = await callWithRetry(reviewAppeal, { appealId, decision: 'accepted' });
+  if (res.data.ok !== true) {
+    throw new Error(`Réponse inattendue : ${JSON.stringify(res.data)}`);
+  }
+
+  const target = (await db.doc('users/apApp12').get()).data();
+  if (target.banned !== false || target.moderationStatus !== 'none' || target.bannedUntil !== null) {
+    throw new Error(`Compte non dé-sanctionné : ${JSON.stringify({ banned: target.banned, moderationStatus: target.moderationStatus, bannedUntil: target.bannedUntil })}`);
+  }
+
+  await signOut(auth);
+});
+
+test('AP13 reviewAppeal : accepte un recours de compte banni/suspendu → unban', async () => {
+  const modUid = await createAuthUser('apmod13@parole.test');
+  await seedProfile(modUid, 'moderator');
+  await seedProfile('apApp13', 'user');
+  await db.doc('users/apApp13').update({ banned: true, bannedUntil: new Date('2030-01-01T00:00:00Z'), moderationStatus: 'suspended' });
+
+  const appealId = await seedAppeal('apApp13', 'user', 'apApp13', 'suspended');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  await callWithRetry(reviewAppeal, { appealId, decision: 'accepted' });
+
+  const target = (await db.doc('users/apApp13').get()).data();
+  if (target.banned !== false || target.bannedUntil !== null || target.moderationStatus !== 'none') {
+    throw new Error(`Compte non débanni : ${JSON.stringify({ banned: target.banned, bannedUntil: target.bannedUntil, moderationStatus: target.moderationStatus })}`);
+  }
+
+  await waitFor(async () => {
+    const snap = await db.collection('auditLogs').where('targetId', '==', 'apApp13').where('action', '==', 'appeal.accepted').get();
+    return snap.size > 0;
+  });
+
+  await signOut(auth);
+});
+
+test('AP14 reviewAppeal : auditLogs détaillés pour accepted', async () => {
+  const modUid = await createAuthUser('apmod14@parole.test');
+  await seedProfile(modUid, 'moderator');
+  await seedProfile('apApp14', 'user');
+
+  const postRef = await seedPost('apApp14', { moderationStatus: 'removed' });
+  const postId = postRef.id;
+  const appealId = await seedAppeal('apApp14', 'post', postId, 'removed', 'Je conteste le retrait.');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  await callWithRetry(reviewAppeal, { appealId, decision: 'accepted' });
+
+  const audit = await waitFor(async () => {
+    const snap = await db.collection('auditLogs').where('targetId', '==', postId).where('action', '==', 'appeal.accepted').get();
+    return snap.size > 0 ? snap.docs : null;
+  });
+  const entry = audit[0].data();
+  if (entry.actorId !== modUid || entry.actorRole !== 'moderator') {
+    throw new Error(`Acteur de l’audit incohérent : ${JSON.stringify(entry)}`);
+  }
+  if (entry.targetType !== 'post' || entry.targetId !== postId) {
+    throw new Error(`Cible de l’audit incohérente : ${JSON.stringify(entry)}`);
+  }
+  if (entry.details?.appealId !== appealId || entry.details?.decision !== 'accepted' || entry.details?.appellantId !== 'apApp14' || entry.details?.sanctionType !== 'removed') {
+    throw new Error(`Détails de l’audit incohérents : ${JSON.stringify(entry.details)}`);
+  }
+
+  await signOut(auth);
+});
+
+test('AP15 reviewAppeal : jamais de notification pour soi-même (modérateur révisant son propre recours)', async () => {
+  const modUid = await createAuthUser('apmod15@parole.test');
+  await seedProfile(modUid, 'moderator');
+  await db.doc(`users/${modUid}`).update({ moderationStatus: 'warned' });
+
+  const appealId = await seedAppeal(modUid, 'user', modUid, 'warned');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  await callWithRetry(reviewAppeal, { appealId, decision: 'accepted' });
+
+  await sleep(1200);
+  const snap = await db.collection('notifications').where('recipientId', '==', modUid).where('type', '==', 'appeal').get();
+  if (snap.size > 0) {
+    throw new Error('Aucune notification ne devrait exister pour une décision sur son propre recours.');
+  }
+
+  await signOut(auth);
+});
+
+test('AP16 reviewAppeal : paramètres malformés REFUS', async () => {
+  const modUid = await createAuthUser('apmod16@parole.test');
+  await seedProfile(modUid, 'moderator');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  await expectCallableError(reviewAppeal({ appealId: 42, decision: 'accepted' }), 'invalid-argument');
+  await expectCallableError(reviewAppeal({ decision: 'accepted' }), 'invalid-argument');
+  await expectCallableError(reviewAppeal({ appealId: 'ok_id' }), 'invalid-argument');
+
+  await signOut(auth);
+});
+
+test('AP17 reviewAppeal : idempotence et atomicité complètes', async () => {
+  const modUid = await createAuthUser('apmod17@parole.test');
+  await seedProfile(modUid, 'moderator');
+  await seedProfile('apApp17', 'user');
+
+  const postRef = await seedPost('apApp17', { moderationStatus: 'hidden' });
+  const postId = postRef.id;
+  const appealId = await seedAppeal('apApp17', 'post', postId, 'hidden');
+
+  const reviewAppeal = httpsCallable(functions, 'reviewAppeal');
+  await callWithRetry(reviewAppeal, { appealId, decision: 'accepted' });
+  await expectCallableError(reviewAppeal({ appealId, decision: 'accepted' }), 'failed-precondition');
+
+  const appeal = (await db.doc(`appeals/${appealId}`).get()).data();
+  if (appeal.status !== 'accepted' || appeal.reviewedBy !== modUid || !appeal.reviewedAt) {
+    throw new Error(`Recours incohérent : ${JSON.stringify(appeal)}`);
+  }
+  if (!appeal.appealId || appeal.appellantId !== 'apApp17' || appeal.targetType !== 'post' || appeal.reason !== 'Je conteste cette sanction.') {
+    throw new Error(`Méta-données du recours altérées : ${JSON.stringify(appeal)}`);
+  }
+
+  const post = (await postRef.get()).data();
+  if (post.moderationStatus !== 'visible' || post.moderatorId !== modUid) {
+    throw new Error(`Restauration du post incohérente : ${JSON.stringify(post)}`);
+  }
+
+  await waitFor(async () => {
+    const snap = await db.doc('users/apApp17').get();
+    return snap.data()?.notificationCount === 1;
+  });
+
+  const notifs = await db.collection('notifications').where('recipientId', '==', 'apApp17').where('type', '==', 'appeal').get();
+  if (notifs.size !== 1) {
+    throw new Error(`Attendu exactement UNE notification de recours, obtenu ${notifs.size}`);
+  }
+
+  await signOut(auth);
 });
 
 // ------------------------------------------------------------

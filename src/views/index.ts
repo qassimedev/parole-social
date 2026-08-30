@@ -22,6 +22,7 @@ import { renderNotifications, mountNotifications } from './notifications';
 import { renderHashtag, mountHashtag } from './hashtag';
 import { renderInbox, mountInbox } from './inbox';
 import { renderConversation, mountConversation } from './conversation';
+import { renderAppeals, mountAppeals } from './appeals';
 
 export function splashView(): string {
   return `
@@ -133,6 +134,10 @@ export function renderView(root: HTMLElement): void {
       }
       root.innerHTML = renderModeration(ctx);
       mountModeration(root, ctx);
+      return;
+    case 'appeals':
+      root.innerHTML = renderAppeals(ctx);
+      mountAppeals(root, ctx);
       return;
     case 'home':
     default:

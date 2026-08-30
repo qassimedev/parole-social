@@ -101,6 +101,25 @@ avec une décision traçable et susceptible d'appel.
   `#/messages/{conversationId}`, bouton « Envoyer un message » sur les
   profils, notification `message` avec lien « Voir la conversation ». Deux
   index composites ajoutés (`conversations` et `messages`).
+- **Phase 9 — Lot 4** (validée) : recours (appeals) — collection
+  `appeals/{appealId}` (ID déterministe `appealId = ${appellantId}_${targetType}_${targetId}`,
+  schéma strict `appealId`, `appellantId`, `targetType ('post'|'comment'|'user')`,
+  `targetId`, `sanctionType`, `reason`, `status ('pending' forcé)`, `createdAt`,
+  document **immuable** côté client : toute mise à jour/suppression est refusée,
+  y compris par un modérateur/admin). Création : `canAct()` (non banni), cible
+  existante, non fichée en recours et réellement sanctionnée
+  (`hidden`/`removed` pour post/comment ; `warned`/`suspended`/`banned` pour
+  user — le ban est donc « sans appel »). Lecture : uniquement
+  `appellantId == auth.uid` ou modérateur/admin (pas d'énumération). **Traitement
+  exclusivement par la Cloud Function `reviewAppeal`** (modérateur/admin) :
+  transition `pending → accepted/rejected` sans re-création (idempotent),
+  `accepted` restaure la cible (post/comment → `visible` + `moderationReason null`
+  + `moderatorId` + `moderatedAt` ; user → déban avec `moderationStatus 'none'`),
+  `rejected` ne restaure rien, chaque décision trace un `auditLogs` et notifie
+  `appeal` au recourant (jamais pour soi-même). Page `#/appeals` (formulaire de
+  recours avec pré-remplissage de la sanction + liste « Mes recours ») et
+  section « Recours » dans la file de modération (boutons Accepter / Rejeter).
+  **Aucun index composite ajouté.**
 
 ---
 
@@ -132,7 +151,8 @@ avec une décision traçable et susceptible d'appel.
 │ • conversations (dédupl.)  │   │ • onFollowCreated/Deleted   │
 │ • messages                  │   │   (cnt abonnements)         │
 │ • moderationQueue           │   │ • onShareCreated/Deleted    │
-│ • notifications             │   │   (cnt `posts.shareCount`)  │
+│ • notifications             │
+│ • appeals (déterministes)   │   │   (cnt `posts.shareCount`)  │
 │ • auditLogs                 │   │ • onLike/Comment/Follow →   │
 │ Index composites minimaux   │   │   notification (Phase 5)    │
 │                             │   │ • onShare → notification    │
@@ -344,6 +364,34 @@ destinataire) et `onMessageUpdated` (−1 au passage non lue → lue, borné ≥
 Le **badge Messages** de la navigation (comme le badge Notifications) affiche
 exclusivement cette valeur et disparaît à zéro.
 
+### appeals/{appealId} (Phase 9 — Lot 4)
+Recours contre une sanction de modération (post, commentaire ou utilisateur).
+- **ID déterministe** : `appealId = ${appellantId}_${targetType}_${targetId}` —
+  un utilisateur ne peut déposer qu'**un seul** recours par cible (un second
+  `setDoc` devient un `update`, refusé). Document **immuable** côté client :
+  aucune mise à jour ni suppression possible, y compris par modérateur/admin
+  (les décisions passent exclusivement par la Cloud Function `reviewAppeal`).
+- Schéma strict : `appealId`, `appellantId`, `targetType ('post'|'comment'|'user')`,
+  `targetId`, `sanctionType`, `reason (1..1000)`, `status ('pending' uniquement,
+  forcé)`, `createdAt`. `hasOnly` avec tous les champs présents, `reason` requis.
+- **Création** : `canAct()` (profil présent, non banni), cible **existante**,
+  pas de recours déjà déposé sur cette cible, et la cible doit être
+  **réellement sanctionnée** : post/comment avec
+  `moderationStatus 'hidden'` ou `'removed'` ; user avec
+  `moderationStatus 'warned'` ou `('suspended'/'banned' et banned == true)`.
+  Un user banni ne peut donc pas contester (conséquence de `canAct`).
+- **Lecture** : uniquement son propre recours (`appellantId == auth.uid`) ou
+  modérateur/admin — pas d'énumération. Les requêtes « mes recours » et
+  « recours à traiter » sont bornées (aucun index composite requis).
+- **Traitement** (Cloud Function `reviewAppeal`) : `accepted` restaure la cible
+  (post/comment → `moderationStatus 'visible'`, `moderationReason null`,
+  `moderatorId`, `moderatedAt` ; user → `banned false`, `bannedUntil null`,
+  `moderationStatus 'none'`, `updatedAt`) ; `rejected` ne restaure rien.
+  Transition `pending → accepted|rejected` atomique et idempotente (un recours
+  déjà décidé ne peut pas être re-traité). Chaque décision écrit un `auditLogs`
+  `appeal.accepted` / `appeal.rejected` et crée une notification `appeal` au
+  recourant (**jamais pour soi-même**).
+
 ### reports/{reportId}
 - **Déduplication** : `reportId = ${reporterId}_${targetType}_${targetId}`.
   Un même utilisateur ne peut créer **qu'un seul** signalement par cible
@@ -364,15 +412,15 @@ exclusivement cette valeur et disparaît à zéro.
   modérateur/admin, écriture Functions uniquement.
 
 ### notifications/{notificationId}
-Notifications de likes, commentaires, abonnements, partages et messages —
-**créées uniquement par les Cloud Functions** (aucune création/suppression
-client).
+Notifications de likes, commentaires, abonnements, partages, messages et
+recours — **créées uniquement par les Cloud Functions** (aucune
+création/suppression client).
 
 | Champ | Type | Description |
 |---|---|---|
 | recipientId | string | destinataire |
 | actorId | string | auteur de l'action |
-| type | `like` / `comment` / `follow` / `share` / `message` | nature de la notification |
+| type | `like` / `comment` / `follow` / `share` / `message` / `appeal` | nature de la notification |
 | postId | string | post concerné, `''` sinon |
 | commentId | string | commentaire concerné, `''` sinon |
 | read | boolean | `false` à la création |
@@ -407,6 +455,9 @@ Types de notifications (jamais pour soi-même) :
 - `reply` : quelqu'un a répondu à votre commentaire → auteur du commentaire parent
   (jamais pour un self-reply, et pas de doublon si l'auteur du parent est déjà
   le propriétaire du post notifié par la notification `comment`).
+- `appeal` (Phase 9 — Lot 4) : le statut de votre recours a été traité →
+  recourant, créée par `reviewAppeal` au moment de la décision (jamais un
+  modérateur révisant son propre recours).
 
 Page `#/notifications` : liste (chargement / vide / erreur + Réessayer), état
 lu/non lu, date, nom de l'acteur (lien `#/u/{actorId}`), bouton « Marquer comme
@@ -420,12 +471,13 @@ Journal append-only des actions administratives et de modération.
 - Lecture : **administrateurs uniquement**.
 
 ### Collections prévues pour les phases suivantes
-`appeals` et `creatorStats` sont déclarées en **deny-by-default** (aucun accès)
-jusqu'à leur implémentation. (`conversations` et `messages` étaient dans cette
-liste avant le Lot 3 : leurs `match` deny-by-default ont été remplacés par de
-vraies règles à la livraison de la messagerie.) La collection `hashtags` n'est
-**pas utilisée** : les hashtags vivent dans le champ optionnel `posts.hashtags`
-(Phase 9 — Lot 1) ; son `match` deny-by-default reste néanmoins en place.
+`creatorStats` est déclarée en **deny-by-default** (aucun accès) jusqu'à son
+implémentation. (`appeals` était dans cette liste avant le Lot 4 : son `match`
+deny-by-default a été remplacé par les vraies règles des recours à la livraison
+du lot ; `conversations` et `messages` ont suivi le même chemin au Lot 3.) La
+collection `hashtags` n'est **pas utilisée** : les hashtags vivent dans le champ
+optionnel `posts.hashtags` (Phase 9 — Lot 1) ; son `match` deny-by-default reste
+néanmoins en place.
 
 ## Rôles et permissions
 
@@ -437,6 +489,8 @@ vraies règles à la livraison de la messagerie.) La collection `hashtags` n'est
 | Suivre / ne plus suivre un utilisateur | ✔ | ✔ | ✔ |
 | Bloquer / débloquer un utilisateur (Phase 9 — Lot 2) | ✔ | ✔ | ✔ |
 | Envoyer / lire des messages privés 1-à-1 (Phase 9 — Lot 3) | ✔ | ✔ | ✔ (lisent tout) |
+| Déposer / consulter ses recours (Phase 9 — Lot 4) | ✔ | ✔ | ✔ |
+| Traiter les recours (Phase 9 — Lot 4) | ✖ | ✔ (via Functions) | ✔ (via Functions) |
 | Lire / marquer ses notifications | ✔ | ✔ | ✔ (admin : lit toutes) |
 | Modifier/supprimer ses propres contenus | ✔ | ✔ | ✔ |
 | Lire les posts publics | ✔ | ✔ | ✔ |
@@ -464,7 +518,7 @@ modération, les compteurs système, les décisions de modération, les
 - Lecture des médias de posts conditionnée à la visibilité du post Firestore
   (`firestore.get` / `firestore.exists`) : un post masqué = médias illisibles.
 
-## Cloud Functions (Phase 1 + ... + Phase 9 — Lot 3)
+## Cloud Functions (Phase 1 + ... + Phase 9 — Lot 4)
 
 | Fonction | Type | Rôle requis | Effet |
 |---|---|---|---|
@@ -472,6 +526,7 @@ modération, les compteurs système, les décisions de modération, les
 | `moderatePost` | callable | moderator/admin | mask/restore/maintain/remove d'un post, résout les signalements pendants, met à jour la file, écrit `auditLogs` |
 | `moderateComment` | callable | moderator/admin | mask/restore/maintain/remove d'un commentaire, résout les signalements pendants, met à jour la file, écrit `auditLogs` |
 | `sanctionUser` | callable | moderator (warn) / admin (ban, unban, setRole) | warn/ban/unban/changement de rôle ; warn/ban résolvent aussi les signalements utilisateur pendants et clôturent la file, écrit `auditLogs` |
+| `reviewAppeal` (Phase 9 — Lot 4) | callable | moderator/admin | traitement d'un recours pending : `accepted` restaure la cible (voir collection `appeals`) / `rejected` ne restaure rien ; transition atomique et idempotente, écrit `auditLogs` `appeal.accepted|rejected` + notification `appeal` au recourant (jamais pour soi-même) |
 | `onReportCreated` | trigger | — | incrémente `post.reportCount` (post) ou `users.reportCount` de l'auteur de la cible (commentaire/utilisateur), crée/met à jour la file de modération |
 | `onReportDeleted` | trigger | — | décrément défensif (`post.reportCount` ou `users.reportCount` de l'auteur de la cible, borné à ≥ 0) |
 | `onCommentCreated` | trigger | — | incrémente `post.commentCount` + notification « comment » au propriétaire du post + notification « reply » à l'auteur du commentaire parent le cas échéant |
@@ -536,6 +591,11 @@ réellement requis :
 - `messages (conversationId ASC, createdAt ASC)` — fil de discussion d'une
   conversation (égalité `conversationId` + ordre chronologique).
 
+La Phase 9 — Lot 4 (recours) n'ajoute **aucun** index composite : les seules
+requêtes client sur `appeals` sont « mes recours » (`where appellantId == moi`)
+et « recours à traiter » (`where status == 'pending'`), toutes deux mono-champ —
+couvertes par les index automatiques des champs uniques.
+
 Le correctif « visibilité des commentaires modérés » ajoute l'index composite
 `comments (postId ASC, moderationStatus ASC, createdAt ASC)`, réellement requis
 par la requête `fetchComments` (égalité `postId` + égalité `moderationStatus`
@@ -563,8 +623,8 @@ Ouvrir l'UI des émulateurs : http://localhost:4000
 npm run typecheck      # vérification TypeScript (frontend)
 npm run build          # build frontend
 npm run build:functions
-npm run test:rules     # tests de sécurité Firestore + Storage (298 tests, émulateurs)
-npm run test:functions # tests des Cloud Functions (46 tests, émulateurs)
+npm run test:rules     # tests de sécurité Firestore + Storage (329 tests, émulateurs)
+npm run test:functions # tests des Cloud Functions (63 tests, émulateurs)
 npm run test:all       # tout
 ```
 

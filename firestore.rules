@@ -716,12 +716,109 @@ service cloud.firestore {
     }
 
     // ----------------------------------------------------------
-    // Collections prévues pour les phases suivantes (DENY BY DEFAULT
-    // jusqu'à implémentation) : appeals, hashtags, creatorStats.
+    // appeals/{appealId} (Phase 9 — Lot 4)
+    // Recours contre une sanction de modération. DÉDUPLICATION par ID
+    // DÉTERMINISTE `appealId = ${appellantId}_${targetType}_${targetId}`
+    // (imposé par la règle) : un second setDoc devient un UPDATE ->
+    // refusé. Un recours ne peut exister qu'EN UN exemplaire par couple
+    // (appelant, cible) : la règle empêche tout doublon.
+    // Création : canAct() (connecté, profil présent, NON banni) +
+    // appellantId == auth.uid + cible APPARTENANT à l'appelant (post/
+    // comment : auteur ; user : l'appelant lui-même) + cible RÉELLEMENT
+    // sanctionnée au moment du dépôt (post/comment :
+    // moderationStatus 'hidden'/'removed' cohérent avec sanctionType ;
+    // user : moderationStatus 'warned', ou banned + 'suspended') +
+    // sanctionType cohérent avec l'état réel + reason 1..2000 +
+    // status == 'pending' + createdAt timestamp + hasOnly strict.
+    // Un utilisateur banni ne peut PAS déposer de recours (canAct) —
+    // y compris pour contester un bannissement (décision de conception,
+    // non levable par le client).
+    // Lecture : l'appelant concerné ou un modérateur/admin (requêtes
+    // « mes recours » bornées sur appellantId et « recours à traiter »
+    // bornées sur status — aucune énumération globale).
+    // UPDATE/DELETE : toujours refusés côté client. Le document est
+    // IMMUABLE : la décision passe EXCLUSIVEMENT par la Cloud Function
+    // `reviewAppeal` (Admin SDK) qui restaure la cible, clôt le recours,
+    // trace dans auditLogs et notifie l'appelant — de façon atomique.
     // ----------------------------------------------------------
-    match /appeals/{docId} {
-      allow read, write: if false;
+
+    // La cible du recours appartient-elle à l'appelant (auth.uid) ?
+    // post/comment : auteur du contenu ; user : l'appelant lui-même
+    // (on ne peut pas contester la sanction d'autrui).
+    function isAppealTargetOwned(targetType, targetId) {
+      return (targetType == 'post')
+        ? (exists(/databases/$(database)/documents/posts/$(targetId))
+            && get(/databases/$(database)/documents/posts/$(targetId)).data.authorId == request.auth.uid)
+        : (targetType == 'comment')
+          ? (exists(/databases/$(database)/documents/comments/$(targetId))
+              && get(/databases/$(database)/documents/comments/$(targetId)).data.authorId == request.auth.uid)
+          : targetId == request.auth.uid;
     }
+
+    // La cible est-elle RÉELLEMENT sanctionnée au moment du dépôt, et
+    // sanctionType cohérent avec son état actuel ?
+    // post/comment : moderationStatus == sanctionType ('hidden' ou
+    // 'removed'). user : 'warned' si moderationStatus == 'warned' ;
+    // 'suspended'/'banned' si banned == true et
+    // moderationStatus == 'suspended'.
+    function isAppealTargetSanctioned(targetType, targetId, sanctionType) {
+      return (targetType == 'post')
+        ? ((sanctionType == 'hidden' || sanctionType == 'removed')
+            && exists(/databases/$(database)/documents/posts/$(targetId))
+            && get(/databases/$(database)/documents/posts/$(targetId)).data.moderationStatus == sanctionType)
+        : (targetType == 'comment')
+          ? ((sanctionType == 'hidden' || sanctionType == 'removed')
+              && exists(/databases/$(database)/documents/comments/$(targetId))
+              && get(/databases/$(database)/documents/comments/$(targetId)).data.moderationStatus == sanctionType)
+          : exists(/databases/$(database)/documents/users/$(targetId))
+              && ((sanctionType == 'warned'
+                    && get(/databases/$(database)/documents/users/$(targetId)).data.moderationStatus == 'warned')
+                  || ((sanctionType == 'suspended' || sanctionType == 'banned')
+                      && get(/databases/$(database)/documents/users/$(targetId)).data.banned == true
+                      && get(/databases/$(database)/documents/users/$(targetId)).data.moderationStatus == 'suspended'));
+    }
+
+    match /appeals/{appealId} {
+      allow create: if canAct()
+        && request.resource.data.appellantId == request.auth.uid
+        && request.resource.data.appealId == appealId
+        && appealId == request.auth.uid + '_' + request.resource.data.targetType + '_' + request.resource.data.targetId
+        && request.resource.data.targetType in ['post', 'comment', 'user']
+        && request.resource.data.targetId is string
+        && request.resource.data.targetId.size() > 0
+        && request.resource.data.sanctionType is string
+        && isAppealTargetOwned(request.resource.data.targetType, request.resource.data.targetId)
+        && isAppealTargetSanctioned(
+             request.resource.data.targetType,
+             request.resource.data.targetId,
+             request.resource.data.sanctionType
+           )
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() >= 1
+        && request.resource.data.reason.size() <= 2000
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.keys().hasOnly([
+          'appealId', 'appellantId', 'targetType', 'targetId',
+          'sanctionType', 'reason', 'status', 'createdAt'
+        ]);
+
+      // L'appelant concerné lit son recours ; les modérateurs/admins
+      // peuvent tout lire (prérequis de la revue). Aucun passe-droit
+      // d'écriture côté client.
+      allow read: if isSignedIn()
+        && (resource.data.appellantId == request.auth.uid || isModerator());
+
+      // La décision (accepted/rejected) passe exclusivement par la
+      // Cloud Function `reviewAppeal`. Le client (appelant, modérateur,
+      // admin) ne peut JAMAIS modifier ni supprimer un recours.
+      allow update, delete: if false;
+    }
+
+    // ----------------------------------------------------------
+    // Collections prévues pour les phases suivantes (DENY BY DEFAULT
+    // jusqu'à implémentation) : hashtags, creatorStats.
+    // ----------------------------------------------------------
     match /hashtags/{docId} {
       allow read, write: if false;
     }

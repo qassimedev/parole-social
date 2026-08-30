@@ -14,7 +14,7 @@ import {
 import * as logger from 'firebase-functions/logger';
 
 // ============================================================
-// PAROLE - Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 + Phase 9 Lot 3)
+// PAROLE - Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 + Phase 9 Lot 3 + Phase 9 Lot 4)
 //
 // Phase 1 : les données sensibles (role, banned, statuts de
 // modération, compteurs système, résolutions de signalements,
@@ -51,6 +51,25 @@ import * as logger from 'firebase-functions/logger';
 // documents immuables). Aucun compteur `users.shareCount`. Une
 // notification de type `share` est créée au propriétaire du post
 // partagé (jamais pour un self-share).
+//
+// Phase 9 - Lot 4 : `reviewAppeal` — recours contre une sanction de
+// modération. Callable réservé aux modérateurs/admins (requireRole).
+// Il lit le recours `appeals/{appealId}` (ID déterministe
+// `{appellantId}_{targetType}_{targetId}`, document immuable côté
+// client), refuse un recours absent ou déjà résolu (status != pending,
+// y compris en cas de course — vérifié à l'intérieur de la
+// transaction), puis dans UNE transaction atomique :
+//   - décision 'accepted' : restaure la cible (post/comment ->
+//     moderationStatus 'visible' ; user -> banned=false,
+//     bannedUntil=null, moderationStatus='none'), refuse si la cible
+//     a disparu (not-found, recours laissé pending) ;
+//   - décision 'rejected' : aucune restauration ;
+//   - clôt le recours (status 'accepted'/'rejected' + reviewedBy +
+//     reviewedAt) ;
+//   - trace dans auditLogs (action `appeal.<decision>`) ;
+//   - notifie l'appelant (type 'appeal', jamais pour soi-même).
+// users.notificationCount est maintenu par onNotificationCreated,
+// comme toute autre notification.
 // ============================================================
 
 initializeApp();
@@ -177,7 +196,7 @@ async function resolveTargetReports(params: {
 // créer, ni les supprimer (règles Firestore). Champs STRICTEMENT
 // présents à chaque création. Aucune notification à soi-même.
 // ------------------------------------------------------------
-const NOTIFICATION_TYPES = ['like', 'comment', 'follow', 'share', 'reply', 'message'] as const;
+const NOTIFICATION_TYPES = ['like', 'comment', 'follow', 'share', 'reply', 'message', 'appeal'] as const;
 type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
 async function createNotification(params: {
@@ -1196,6 +1215,158 @@ export const onMessageUpdated = onDocumentUpdated('messages/{messageId}', async 
     logger.info(`Message marked read by user ${recipientId}`);
   }
 });
+
+// ------------------------------------------------------------
+// Recours (Phase 9 — Lot 4)
+// `reviewAppeal` : décision d'un modérateur/admin sur un recours.
+//   1. requireRole(['moderator', 'admin']) — un utilisateur simple
+//      ne peut jamais prendre de décision (pas de passe-droit
+//      d'écriture directe sur `appeals`, pas de passage ici pour un
+//      appelant).
+//   2. Entrées strictes : appealId (non vide) + decision
+//      ('accepted' | 'rejected').
+//   3. Le recours doit exister et être ENCORE `pending` — le statut
+//      est RE-vérifié dans la transaction (idempotence : deux
+//      modérateurs qui se croisent ne font jamais une double
+//      décision).
+//   4. 'accepted' restaure la cible (post/comment -> 'visible',
+//      user -> dé-sanction), atomiquement avec la clôture du
+//      recours, le journal d'audit et la notification à l'appelant.
+//      Si la cible a disparu (post/comment supprimés, profil absent),
+//      la transaction est annulée et l'appel reste pending
+//      (not-found).
+//   5. 'rejected' ne restaure rien : le statut passe à 'rejected',
+//      la décision reste traçable (auditLogs + notification).
+// ------------------------------------------------------------
+
+const APPEAL_DECISIONS = ['accepted', 'rejected'] as const;
+type AppealDecision = (typeof APPEAL_DECISIONS)[number];
+
+export const reviewAppeal = onCall(
+  { cors: true },
+  async (request) => {
+    const actor = await requireRole(request, ['moderator', 'admin']);
+    const data = (request.data ?? {}) as {
+      appealId?: unknown;
+      decision?: unknown;
+    };
+
+    if (typeof data.appealId !== 'string' || data.appealId.length === 0) {
+      throw new HttpsError('invalid-argument', 'appealId is required.');
+    }
+    if (typeof data.decision !== 'string' || !APPEAL_DECISIONS.includes(data.decision as AppealDecision)) {
+      throw new HttpsError('invalid-argument', `Unknown appeal decision: ${String(data.decision)}`);
+    }
+
+    const appealId = data.appealId;
+    const decision = data.decision as AppealDecision;
+    const appealRef = db.doc(`appeals/${appealId}`);
+
+    // Pré-vérifications (codes d'erreur clairs) puis transaction
+    // atomique avec re-vérification du statut pour l'idempotence.
+    const preSnap = await appealRef.get();
+    if (!preSnap.exists) {
+      throw new HttpsError('not-found', 'Appeal not found.');
+    }
+    if (preSnap.data()?.status !== 'pending') {
+      throw new HttpsError('failed-precondition', 'Appeal already resolved.');
+    }
+
+    await db.runTransaction(async (tx) => {
+      const appealSnap = await tx.get(appealRef);
+      if (!appealSnap.exists) {
+        throw new HttpsError('not-found', 'Appeal not found.');
+      }
+      const appeal = appealSnap.data();
+      if (!appeal) {
+        throw new HttpsError('not-found', 'Appeal not found.');
+      }
+      if (appeal.status !== 'pending') {
+        throw new HttpsError('failed-precondition', 'Appeal already resolved.');
+      }
+
+      const targetType = appeal.targetType as string;
+      const targetId = appeal.targetId as string;
+      const appellantId = appeal.appellantId as string;
+      const sanctionType = appeal.sanctionType as string;
+      const reason = typeof appeal.reason === 'string' ? appeal.reason : '';
+
+      const targetRef =
+        targetType === 'user'
+          ? db.doc(`users/${targetId}`)
+          : targetType === 'comment'
+            ? db.doc(`comments/${targetId}`)
+            : db.doc(`posts/${targetId}`);
+
+      // Restauration de la cible UNIQUEMENT en cas d'acceptation.
+      if (decision === 'accepted') {
+        const targetSnap = await tx.get(targetRef);
+        if (!targetSnap.exists) {
+          throw new HttpsError('not-found', 'Target not found.');
+        }
+        if (targetType === 'post') {
+          tx.update(targetRef, {
+            moderationStatus: 'visible',
+            moderationReason: null,
+            moderatorId: actor.uid,
+            moderatedAt: serverTimestamp(),
+          });
+        } else if (targetType === 'comment') {
+          tx.update(targetRef, {
+            moderationStatus: 'visible',
+            moderationReason: null,
+            moderatorId: actor.uid,
+            moderatedAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          tx.update(targetRef, {
+            banned: false,
+            bannedUntil: null,
+            moderationStatus: 'none',
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+
+      // Clôture traçable du recours.
+      tx.update(appealRef, {
+        status: decision,
+        reviewedBy: actor.uid,
+        reviewedAt: serverTimestamp(),
+      });
+
+      // Journal d'audit (append-only, atomique avec la décision).
+      tx.set(db.collection('auditLogs').doc(), {
+        actorId: actor.uid,
+        actorRole: actor.role,
+        action: `appeal.${decision}`,
+        targetType,
+        targetId,
+        details: { appealId, appellantId, sanctionType, reason, decision },
+        createdAt: serverTimestamp(),
+      });
+
+      // Notification à l'appelant (jamais pour soi-même : un
+      // modérateur qui révise son propre recours n'est pas notifié).
+      if (appellantId && actor.uid !== appellantId) {
+        tx.set(db.collection('notifications').doc(), {
+          recipientId: appellantId,
+          actorId: actor.uid,
+          type: 'appeal',
+          postId: targetType === 'post' ? targetId : '',
+          commentId: targetType === 'comment' ? targetId : '',
+          read: false,
+          readAt: null,
+          createdAt: serverTimestamp(),
+        });
+      }
+    });
+
+    logger.info(`Appeal ${appealId} ${decision} by ${actor.uid}`);
+    return { ok: true, appealId, decision };
+  }
+);
 
 // ------------------------------------------------------------
 // Santé du service
