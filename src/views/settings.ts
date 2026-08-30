@@ -2,6 +2,78 @@ import { changePassword, signOut, sendVerificationEmail } from '../lib/auth';
 import { describeError } from '../lib/errors';
 import { notify } from '../lib/notify';
 import { validatePassword, validatePasswordConfirm } from '../lib/validation';
+import { fetchBlockedIds, unblockUser } from '../lib/blocks';
+import { getFirestoreInstance } from '../lib/firebase';
+import { doc, getDoc } from 'firebase/firestore';
+
+const db = getFirestoreInstance();
+
+interface BlockedUserInfo {
+  blockedId: string;
+  displayName: string;
+}
+
+// Liste des utilisateurs bloqués par l'utilisateur courant (requête
+// « mes blocages » : where blockerId == moi). Strictement privée —
+// les règles refusent de lire les blocages d'autrui.
+// Ne pas afficher le blocage : uniquement Débloquer + lien profil.
+async function loadBlockedUsers(root: HTMLElement, uid: string): Promise<void> {
+  const container = root.querySelector<HTMLDivElement>('#settings-blocked');
+  const alerts = root.querySelector<HTMLDivElement>('#settings-alerts');
+  if (!container) return;
+  container.innerHTML = `<div class="muted">Chargement…</div>`;
+  try {
+    const blockedIds = await fetchBlockedIds(uid);
+    if (blockedIds.size === 0) {
+      container.innerHTML = `<p class="muted">Aucun utilisateur bloqué pour le moment.</p>`;
+      return;
+    }
+    const infos: BlockedUserInfo[] = [];
+    for (const blockedId of blockedIds) {
+      const snap = await getDoc(doc(db, 'users', blockedId));
+      const displayName = snap.exists() ? String(snap.data().displayName ?? blockedId) : blockedId;
+      infos.push({ blockedId, displayName });
+    }
+    infos.sort((a, b) => a.displayName.localeCompare(b.displayName, 'fr'));
+    container.innerHTML = infos
+      .map(
+        (info) => `
+      <div class="blocked-user" id="blocked-user-${escapeHtml(info.blockedId)}">
+        <div class="blocked-user__info">
+          <a href="#/u/${escapeHtml(info.blockedId)}">${escapeHtml(info.displayName)}</a>
+          <span class="muted small">${escapeHtml(info.blockedId)}</span>
+        </div>
+        <button type="button" class="btn btn--ghost btn--sm blocked-user__unblock" data-blocked-id="${escapeHtml(info.blockedId)}">
+          <span class="btn__label">Débloquer</span>
+        </button>
+      </div>
+    `
+      )
+      .join('\n');
+
+    container.querySelectorAll<HTMLButtonElement>('.blocked-user__unblock').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const blockedId = btn.dataset.blockedId ?? '';
+        if (!blockedId || btn.disabled) return;
+        btn.disabled = true;
+        try {
+          await unblockUser(uid, blockedId);
+          container.querySelector(`#blocked-user-${CSS.escape(blockedId)}`)?.remove();
+          notify('Utilisateur débloqué.', 'success');
+          if (container.querySelectorAll('.blocked-user').length === 0) {
+            container.innerHTML = `<p class="muted">Aucun utilisateur bloqué pour le moment.</p>`;
+          }
+        } catch (err) {
+          if (alerts) alerts.innerHTML = alertMarkup(describeError(err), 'error');
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+  } catch (err) {
+    container.innerHTML = `<div class="alert alert--error" role="alert">${escapeHtml(describeError(err))}</div>`;
+  }
+}
 import {
   appShell,
   alertMarkup,
@@ -71,6 +143,17 @@ export function renderSettings(ctx: ViewContext): string {
     </section>
 
     <section class="card">
+      <h2 class="card__title">Utilisateurs bloqués</h2>
+      <p class="muted small">
+        Les personnes bloquées ne pourront pas entrer en contact avec vous
+        (messagerie notamment). Cette liste est strictement personnelle.
+      </p>
+      <div id="settings-blocked">
+        <div class="muted">Chargement…</div>
+      </div>
+    </section>
+
+    <section class="card">
       <h2 class="card__title">Session</h2>
       <button id="settings-signout" class="btn btn--danger">
         <span class="btn__label">Se déconnecter</span>
@@ -92,6 +175,10 @@ export function renderSettings(ctx: ViewContext): string {
 }
 
 export function mountSettings(root: HTMLElement, ctx: ViewContext): void {
+  const session = ctx.session;
+  if (session.status !== 'signed-in') return;
+  const uid = session.uid;
+  if (!uid) return;
   const alerts = root.querySelector<HTMLDivElement>('#settings-alerts');
   const passwordForm = root.querySelector<HTMLFormElement>('#settings-password-form');
   const signoutBtn = root.querySelector<HTMLButtonElement>('#settings-signout');
@@ -158,4 +245,6 @@ export function mountSettings(root: HTMLElement, ctx: ViewContext): void {
       if (alerts) alerts.innerHTML = alertMarkup(describeError(err), 'error');
     }
   });
+
+  void loadBlockedUsers(root, uid);
 }

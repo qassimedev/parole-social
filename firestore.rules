@@ -471,6 +471,61 @@ service cloud.firestore {
     }
 
     // ----------------------------------------------------------
+    // blocks/{blockId} (Phase 9 — Lot 2)
+    // Blocage utilisateur. ID DÉTERMINISTE
+    // `blockId = ${blockerId}_${blockedId}` (imposé par la règle de
+    // création) : un même couple ne peut exister qu'en un seul
+    // document, un second setDoc devient un UPDATE -> refusé.
+    // Le blocage est DIRECTIONNEL au niveau du document (alice_bob =
+    // Alice bloque Bob), MAIS son effet de sécurité futur (messagerie,
+    // Lot 3) sera BIDIRECTIONNEL : les règles `messages` devront
+    // vérifier les deux directions via exists(). Aucun document
+    // inverse automatique : le blocage reste une décision personnelle.
+    // Champs strictement limités à blockerId, blockedId, createdAt
+    // (hasOnly exact) : schéma minimal, aucune donnée sensible.
+    // Création : canAct() (connecté, profil présent, non banni),
+    // blockerId == auth.uid, côté opposé distinct de soi, cible
+    // existante et non bannie (même contrainte que les follows).
+    // Lecture : le blocker seul (ou modérateur/admin). Le bloqué et
+    // les tiers ne lisent PAS le document : impossible d'énumérer les
+    // blocages d'autrui (le moteur impose une requête bornée sur
+    // blockerId). Les futurs contrôles de messagerie utiliseront
+    // exists(), qui ne dépend pas de ce droit de lecture.
+    // UPDATE : toujours refusé (un blocage est immuable).
+    // DELETE : uniquement le blocker (isOwner). Un utilisateur banni
+    // peut encore débloquer — aligné sur la convention follow/like/
+    // share (delete = isOwner, pas canAct) — mais ne peut PAS créer
+    // de nouveau blocage (create exige canAct()).
+    // Aucune Cloud Function : rien à compter, rien à tracer.
+    // ----------------------------------------------------------
+    match /blocks/{blockId} {
+      allow read: if isSignedIn()
+        && (request.auth.uid == resource.data.blockerId || isModerator());
+
+      allow create: if canAct()
+        && 'blockedId' in request.resource.data
+        && request.resource.data.blockerId == request.auth.uid
+        && request.resource.data.blockedId is string
+        && request.resource.data.blockedId.size() > 0
+        && request.resource.data.blockedId != request.auth.uid
+        && blockId == request.auth.uid + '_' + request.resource.data.blockedId
+        // La cible doit exister et ne pas être bannie.
+        && exists(/databases/$(database)/documents/users/$(request.resource.data.blockedId))
+        && !isBanned(request.resource.data.blockedId)
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.keys().hasOnly([
+          'blockerId', 'blockedId', 'createdAt'
+        ]);
+
+      // Un blocage est immuable : on bloque ou on débloque, jamais de
+      // modification.
+      allow update: if false;
+
+      // Retrait d'un blocage : uniquement le blocker.
+      allow delete: if isOwner(resource.data.blockerId);
+    }
+
+    // ----------------------------------------------------------
     // Collections prévues pour les phases suivantes (DENY BY DEFAULT
     // jusqu'à implémentation) : appeals, messages, hashtags,
     // creatorStats.

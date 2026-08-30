@@ -30,6 +30,14 @@
 // tableau normalisé [0-9a-z_] {1,32} × ≤ 10 accepté, valeurs
 // invalides/non normalisées/champs parasites refusés, update hashtags
 // valide/invalide, requête page hashtag conforme et sans fuite.
+// Phase 9 : bloc O (Blocage utilisateur, Lot 2) — collection
+// blocks/{blockerId}_{blockedId}, schéma strict (3 champs),
+// auto-blocage interdit, cible existante/non bannie requise,
+// ID déterministe imposé, document immuable (update refusé),
+// lecture blocker/modérateur/admin uniquement (jamais le bloqué, ni
+// un tiers — pas d'énumération), suppression réservée au blocker,
+// pas de document inverse automatique, requête « mes blocages »
+// bornée sur blockerId.
 // ============================================================
 
 import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
@@ -186,6 +194,10 @@ const SEED_POSTS = {
   postHtag3: post('alice', 'Alice', 'private', 'visible', { hashtags: ['parole'] }),
 };
 
+function blockDoc(blockerId, blockedId) {
+  return { blockerId, blockedId, createdAt: T.createdAt };
+}
+
 async function seed() {
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
@@ -242,6 +254,11 @@ async function seed() {
     await upload('media/bob/avatars/profile.png', 'image/png', 1024);
     await upload('media/alice/posts/post1/photo.png', 'image/png', 2048);
     await upload('media/bob/posts/post4/photo.png', 'image/png', 2048);
+
+    // Blocages (Phase 9 - Lot 2) : alice bloque bob. Le document
+    // inverse bob_alice n'existe PAS et ne doit jamais être créé
+    // automatiquement.
+    await setDoc(doc(db, 'blocks', 'alice_bob'), blockDoc('alice', 'bob'));
   });
 }
 
@@ -1234,6 +1251,135 @@ test('N13 Aucune fuite via la requête hashtag (posts followers/private exclus)'
   if (leaked.length > 0) {
     throw new Error(`Fuite de posts non lisibles par la page hashtag : ${leaked.join(', ')}`);
   }
+});
+
+// ============================================================
+// O. Blocage utilisateur (Phase 9 - Lot 2)
+// Convention : collection blocks/{blockerId}_{blockedId}, schéma
+// STRICT à trois champs (blockerId, blockedId, createdAt — hasOnly
+// exact), ID déterministe imposé par la règle. Le blocage est
+// directionnel (alice_bob = Alice bloque Bob) ; son effet futur sur
+// la messagerie sera bidirectionnel via exists() sur les deux
+// directions. AUCUN document inverse automatique.
+// Création : canAct(), blockerId == auth.uid, pas d'auto-blocage,
+// cible existante et non bannie, createdAt timestamp obligatoire.
+// Lecture : blocker ou modérateur/admin UNIQUEMENT — le bloqué et
+// les tiers ne lisent pas (pas d'énumération). Le document est
+// IMMUABLE (update refusé, même pour un modérateur). Suppression :
+// uniquement le blocker (isOwner, aligné follow/like/share : un
+// utilisateur banni peut débloquer mais ne peut pas créer de
+// nouveau blocage).
+// ============================================================
+test('O01 Création d’un blocage d’un utilisateur existant OK', async () => {
+  await expectAllowed(setDoc(doc(eve().firestore(), 'blocks', 'eve_bob'), blockDoc('eve', 'bob')));
+});
+test('O02 Auto-blocage REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'blocks', 'eve_eve'), blockDoc('eve', 'eve')));
+});
+test('O03 blockerId différent de auth.uid REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'blocks', 'alice_bob'), blockDoc('alice', 'bob')));
+});
+test('O04 Cible inexistante REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'blocks', 'eve_nouser'), blockDoc('eve', 'nouser')));
+});
+test('O05 Cible bannie REFUS', async () => {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'users', 'bannedTarget'), user('bannedTarget', 'user', { banned: true }));
+  });
+  await expectDenied(setDoc(doc(eve().firestore(), 'blocks', 'eve_bannedTarget'), blockDoc('eve', 'bannedTarget')));
+});
+test('O06 Identifiant de document incohérent REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'blocks', 'wrong_bob'), blockDoc('eve', 'bob')));
+});
+test('O07 Champ parasite à la création REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'blocks', 'eve_bob'), { ...blockDoc('eve', 'bob'), hacked: 1 }));
+});
+test('O08 Champ obligatoire absent (blockedId) REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'blocks', 'eve_bob'), { blockerId: 'eve', createdAt: T.createdAt }));
+});
+test('O09 Types incorrects REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'blocks', 'eve_bob'), blockDoc('eve', 42)));
+  await expectDenied(setDoc(doc(eve().firestore(), 'blocks', 'eve_bob'), { blockerId: 'eve', blockedId: 'bob', createdAt: 'not-a-date' }));
+  await expectDenied(setDoc(doc(eve().firestore(), 'blocks', 'eve_'), blockDoc('eve', '')));
+});
+test('O10 Utilisateur banni ne peut pas bloquer REFUS', async () => {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'users', 'bannedB'), user('bannedB', 'user', { banned: true }));
+  });
+  const banned = () => testEnv.authenticatedContext('bannedB');
+  await expectDenied(setDoc(doc(banned().firestore(), 'blocks', 'bannedB_bob'), blockDoc('bannedB', 'bob')));
+});
+test('O11 Un même couple ne peut exister qu’en un seul document REFUS (double création = update)', async () => {
+  await expectAllowed(setDoc(doc(eve().firestore(), 'blocks', 'eve_charlie'), blockDoc('eve', 'charlie')));
+  await expectDenied(setDoc(doc(eve().firestore(), 'blocks', 'eve_charlie'), blockDoc('eve', 'charlie')));
+});
+test('O12 Le blocker lit son blocage OK', async () => {
+  await expectAllowed(getDoc(doc(alice().firestore(), 'blocks', 'alice_bob')));
+});
+test('O13 Le bloqué ne lit pas le blocage REFUS', async () => {
+  await expectDenied(getDoc(doc(bob().firestore(), 'blocks', 'alice_bob')));
+});
+test('O14 Un tiers ne lit pas le blocage REFUS', async () => {
+  await expectDenied(getDoc(doc(charlie().firestore(), 'blocks', 'alice_bob')));
+});
+test('O15 Modérateur et admin lisent n’importe quel blocage OK', async () => {
+  await expectAllowed(getDoc(doc(mod().firestore(), 'blocks', 'alice_bob')));
+  await expectAllowed(getDoc(doc(admin().firestore(), 'blocks', 'alice_bob')));
+});
+test('O16 Le blocker ne peut pas modifier son blocage REFUS', async () => {
+  await expectDenied(updateDoc(doc(alice().firestore(), 'blocks', 'alice_bob'), { blockedId: 'eve' }));
+});
+test('O17 Un tiers ne peut pas modifier le blocage REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'blocks', 'alice_bob'), { blockedId: 'alice' }));
+});
+test('O18 Un modérateur ne peut pas modifier le blocage REFUS', async () => {
+  await expectDenied(updateDoc(doc(mod().firestore(), 'blocks', 'alice_bob'), { blockedId: 'mod' }));
+});
+test('O19 Le blocker supprime son blocage OK', async () => {
+  await expectAllowed(setDoc(doc(eve().firestore(), 'blocks', 'eve_dave'), blockDoc('eve', 'dave')));
+  await expectAllowed(deleteDoc(doc(eve().firestore(), 'blocks', 'eve_dave')));
+});
+test('O20 Le bloqué ne peut pas supprimer REFUS', async () => {
+  await expectAllowed(setDoc(doc(bob().firestore(), 'blocks', 'bob_eve'), blockDoc('bob', 'eve')));
+  await expectDenied(deleteDoc(doc(eve().firestore(), 'blocks', 'bob_eve')));
+});
+test('O21 Un tiers ne peut pas supprimer REFUS', async () => {
+  await expectDenied(deleteDoc(doc(dave().firestore(), 'blocks', 'alice_bob')));
+});
+test('O22 Utilisateur banni peut supprimer son propre blocage OK (convention isOwner, alignée follow/like/share)', async () => {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'users', 'bannedD'), user('bannedD', 'user', { banned: true }));
+    await setDoc(doc(ctx.firestore(), 'blocks', 'bannedD_alice'), blockDoc('bannedD', 'alice'));
+  });
+  const banned = () => testEnv.authenticatedContext('bannedD');
+  await expectAllowed(deleteDoc(doc(banned().firestore(), 'blocks', 'bannedD_alice')));
+});
+test('O23 Requête « mes blocages » (where blockerId == moi) OK et bornée', async () => {
+  const snap = await getDocs(query(collection(alice().firestore(), 'blocks'), where('blockerId', '==', 'alice')));
+  const ids = snap.docs.map((d) => d.id);
+  if (!ids.includes('alice_bob')) {
+    throw new Error(`La requête devrait contenir alice_bob : ${ids.join(', ')}`);
+  }
+  const leaked = snap.docs.filter((d) => d.data().blockerId !== 'alice');
+  if (leaked.length > 0) {
+    throw new Error(`Fuite de blocages d’autrui dans « mes blocages » : ${leaked.map((d) => d.id).join(', ')}`);
+  }
+});
+test('O24 Un tiers ne peut pas énumérer tous les blocages REFUS', async () => {
+  await expectDenied(getDocs(collection(charlie().firestore(), 'blocks')));
+});
+test('O25 Aucun document inverse automatique (bob_alice inexistant)', async () => {
+  // La lecture d'un document INEXISTANT est refusée par le moteur de
+  // règles (déréférence de resource sur null) pour un non-bloquer
+  // comme pour le bloqué : on vérifie donc la vérité de la BASE via
+  // avecRulesDisabled — le document inverse bob_alice ne doit jamais
+  // avoir été créé par la création d'alice_bob (aucune double écriture).
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const snap = await getDoc(doc(ctx.firestore(), 'blocks', 'bob_alice'));
+    if (snap.exists()) {
+      throw new Error('Le document inverse bob_alice ne devrait pas exister.');
+    }
+  });
 });
 
 // ============================================================

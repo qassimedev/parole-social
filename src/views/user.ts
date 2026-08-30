@@ -13,9 +13,11 @@
 import { getFirestoreInstance } from '../lib/firebase';
 import { doc, getDoc, type DocumentData } from 'firebase/firestore';
 import { describeError } from '../lib/errors';
+import { notify } from '../lib/notify';
 import { getAvatarUrl } from '../lib/profile';
 import { fetchPostsByAuthor, linkifyHashtags, type Post } from '../lib/posts';
 import { isFollowing, toggleFollow } from '../lib/follows';
+import { blockUser, isUserBlocked, unblockUser } from '../lib/blocks';
 import type { UserProfile } from '../lib/store';
 import {
   appShell,
@@ -142,6 +144,7 @@ export function mountUser(root: HTMLElement, ctx: ViewContext): void {
       const profile = snapshotToProfile(snap.data());
       const isSelf = profile.uid === uid;
       const followState = isSelf ? false : await isFollowing(uid, profile.uid);
+      const blockedState = isSelf ? false : await isUserBlocked(uid, profile.uid);
 
       let avatarUrl: string | null = null;
       if (profile.avatarPath) {
@@ -166,6 +169,17 @@ export function mountUser(root: HTMLElement, ctx: ViewContext): void {
       </button>
     `;
 
+      const blockButton = isSelf
+        ? ``
+        : `
+      <button type="button" id="user-block" class="btn ${blockedState ? 'btn--ghost' : 'btn--danger'}"
+        data-blocked="${blockedState ? 'true' : 'false'}"
+        data-user-id="${escapeHtml(profile.uid)}"
+        aria-pressed="${blockedState ? 'true' : 'false'}">
+        <span class="btn__label">${blockedState ? 'Débloquer' : 'Bloquer'}</span>
+      </button>
+    `;
+
       container.innerHTML = `
         <div class="profile-header">
           <div id="user-avatar-slot">${avatarMarkup(avatarUrl, profile.displayName, 'lg')}</div>
@@ -182,7 +196,7 @@ export function mountUser(root: HTMLElement, ctx: ViewContext): void {
           <dt>Abonnements</dt><dd id="user-following-count">${Number(profile.followingCount) || 0}</dd>
           <dt>Abonnés</dt><dd id="user-follower-count">${Number(profile.followerCount) || 0}</dd>
         </dl>
-        <div class="actions">${followButton}</div>
+        <div class="actions">${followButton}${blockButton}</div>
         <h3 class="card__title card__title--sm">Publications récentes</h3>
         <div class="post-feed" id="user-posts">
           <div class="muted">Chargement des publications…</div>
@@ -230,6 +244,47 @@ export function mountUser(root: HTMLElement, ctx: ViewContext): void {
             alerts.innerHTML = `<div class="alert alert--error" role="alert">${escapeHtml(describeError(err))}</div>`;
           } finally {
             followBtn.disabled = false;
+          }
+        });
+      }
+
+      // Bouton Bloquer / Débloquer (état après succès — les règles
+      // restent l'autorité). Confirmation native avant un blocage.
+      const blockBtn = container.querySelector<HTMLButtonElement>('#user-block');
+      if (blockBtn && !isSelf && alerts) {
+        const setBlocked = (blocked: boolean): void => {
+          blockBtn.dataset.blocked = String(blocked);
+          blockBtn.setAttribute('aria-pressed', String(blocked));
+          blockBtn.classList.toggle('btn--danger', !blocked);
+          blockBtn.classList.toggle('btn--ghost', blocked);
+          const label = blockBtn.querySelector('.btn__label');
+          if (label) label.textContent = blocked ? 'Débloquer' : 'Bloquer';
+        };
+
+        blockBtn.addEventListener('click', async () => {
+          if (blockBtn.disabled) return;
+          const wasBlocked = blockBtn.dataset.blocked === 'true';
+          if (!wasBlocked) {
+            const ok = window.confirm(
+              'Voulez-vous vraiment bloquer cet utilisateur ? Les futurs systèmes (messagerie notamment) lui interdiraient de vous contacter.'
+            );
+            if (!ok) return;
+          }
+          blockBtn.disabled = true;
+          try {
+            if (wasBlocked) {
+              await unblockUser(uid, profile.uid);
+              setBlocked(false);
+              notify('Utilisateur débloqué.', 'success');
+            } else {
+              await blockUser(uid, profile.uid);
+              setBlocked(true);
+              notify('Utilisateur bloqué.', 'success');
+            }
+          } catch (err) {
+            alerts.innerHTML = `<div class="alert alert--error" role="alert">${escapeHtml(describeError(err))}</div>`;
+          } finally {
+            blockBtn.disabled = false;
           }
         });
       }

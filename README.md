@@ -73,6 +73,17 @@ avec une décision traçable et susceptible d'appel.
   `hashtags array-contains` + `visibility == 'public'` +
   `moderationStatus == 'visible'`, index composite dédié). Aucune collection
   `hashtags` créée, aucune recherche full-text, aucune Cloud Function ajoutée.
+- **Phase 9 — Lot 2** (validée) : blocage utilisateur — collection
+  `blocks/{blockerId}_{blockedId}` (ID déterministe, schéma strict à trois
+  champs `blockerId`, `blockedId`, `createdAt`, document **immuable** côté
+  client), auto-blocage interdit, cible existante et non bannie exigée,
+  lecture réservée au bloquant (ou modérateur/admin — jamais au bloqué, ni à
+  un tiers), déblocage réservé au bloquant, prérequis de sécurité pour la
+  messagerie : l'effet futur sera **bidirectionnel** via `exists()` sur les
+  deux directions (`blocks/alice_bob` **et** `blocks/bob_alice`). Bouton
+  Bloquer / Débloquer sur les profils publics + section « Utilisateurs
+  bloqués » dans les Paramètres. Aucune Cloud Function, aucun index
+  composite ajouté.
 
 ---
 
@@ -100,7 +111,7 @@ avec une décision traçable et susceptible d'appel.
 │ • likes (dédupliqués)       │   │ • sanctionUser              │
 │ • follows (dédupliqués)     │   │ • onReportCreated (cnt)     │
 │ • shares (dédupliqués)     │   │ • onCommentCreated/Deleted  │
-│ • reports (dédupliqués)     │   │ • onLikeCreated/Deleted(cnt)│
+│ • blocks (dédupliqués)     │   │ • onLikeCreated/Deleted(cnt)│
 │ • moderationQueue           │   │ • onFollowCreated/Deleted   │
 │ • notifications             │   │   (cnt abonnements)         │
 │ • auditLogs                 │   │ • onShareCreated/Deleted    │
@@ -239,6 +250,32 @@ suppression par l'auteur. `postId`/`authorId`/`moderationStatus` immuables côt�
 - Notification de type `share` au propriétaire du post partagé, jamais pour un
   self-share (géré par `createNotification`).
 
+### blocks/{blockId} (Phase 9 — Lot 2)
+Blocage utilisateur — prérequis de sécurité pour la messagerie.
+- **Déduplication** : `blockId = ${blockerId}_${blockedId}` — un même couple ne
+  peut exister qu'en **un seul** document (un second `setDoc` devient un
+  `update`, refusé). Le blocage est **directionnel** au niveau du document
+  (`blocks/alice_bob` = Alice bloque Bob) : **aucun document inverse
+  automatique** — le blocage reste une décision personnelle.
+- **Schéma strict** (hasOnly exact) : `blockerId`, `blockedId`, `createdAt`
+  (timestamp). Aucun autre champ, aucune donnée sensible, aucune Cloud Function
+  (rien à compter ni à tracer).
+- Création : `canAct()` (connecté, profil présent, non banni), `blockerId ==
+  auth.uid`, auto-blocage interdit, ID déterministe imposé par la règle, cible
+  **existante** et **non bannie** (même contrainte que les follows).
+- **Immuabilité** : `update` toujours refusé (y compris pour un modérateur).
+- Lecture : le **bloquer** (`blockerId == auth.uid`) ou modérateur/admin
+  uniquement. Le **bloqué** et les **tiers ne lisent pas** le document —
+  impossible d'énumérer les blocages d'autrui. La requête « mes blocages » est
+  mono-champ (`where blockerId == moi`) : **aucun index composite requis**.
+- Déblocage : suppression réservée au bloquer (`isOwner`, aligné
+  follow/like/share).
+- **Effet futur (Messagerie, Lot 3)** : les règles `messages` devront vérifier
+  les **deux directions** via `exists()` ——
+  `blocks/alice_bob` **ou** `blocks/bob_alice` — pour interdire Alice↔Bob dès
+  qu'un blocage existe dans l'une ou l'autre direction. `exists()` ne dépend pas
+  du droit de lecture.
+
 ### reports/{reportId}
 - **Déduplication** : `reportId = ${reporterId}_${targetType}_${targetId}`.
   Un même utilisateur ne peut créer **qu'un seul** signalement par cible
@@ -323,6 +360,7 @@ utilisée** : les hashtags vivent dans le champ optionnel `posts.hashtags`
 | Liker / retirer son like | ✔ | ✔ | ✔ |
 | Partager / retirer son partage (Phase 6) | ✔ | ✔ | ✔ |
 | Suivre / ne plus suivre un utilisateur | ✔ | ✔ | ✔ |
+| Bloquer / débloquer un utilisateur (Phase 9 — Lot 2) | ✔ | ✔ | ✔ |
 | Lire / marquer ses notifications | ✔ | ✔ | ✔ (admin : lit toutes) |
 | Modifier/supprimer ses propres contenus | ✔ | ✔ | ✔ |
 | Lire les posts publics | ✔ | ✔ | ✔ |
@@ -407,6 +445,10 @@ moderationStatus ASC)`, pour la requête `hashtags array-contains` +
 `visibility == 'public'` + `moderationStatus == 'visible'` (même contrainte que
 le fil *Général*, étendue au tag). Aucun autre index n'est ajouté pour ce lot.
 
+La Phase 9 — Lot 2 (blocage utilisateur) n'ajoute **aucun** index composite :
+la seule requête client sur `blocks` est « mes blocages » (`where blockerId ==
+moi`), mono-champ — couverte par l'index automatique des champs uniques.
+
 Le correctif « visibilité des commentaires modérés » ajoute l'index composite
 `comments (postId ASC, moderationStatus ASC, createdAt ASC)`, réellement requis
 par la requête `fetchComments` (égalité `postId` + égalité `moderationStatus`
@@ -434,7 +476,7 @@ Ouvrir l'UI des émulateurs : http://localhost:4000
 npm run typecheck      # vérification TypeScript (frontend)
 npm run build          # build frontend
 npm run build:functions
-npm run test:rules     # tests de sécurité Firestore + Storage (207 tests, émulateurs)
+npm run test:rules     # tests de sécurité Firestore + Storage (245 tests, émulateurs)
 npm run test:functions # tests des Cloud Functions (41 tests, émulateurs)
 npm run test:all       # tout
 ```

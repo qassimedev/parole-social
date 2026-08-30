@@ -272,6 +272,27 @@ body {
   font-size: 0.85rem;
 }
 
+/* Utilisateurs bloqués (Phase 9 — Lot 2) */
+.blocked-user {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.blocked-user:last-child {
+  border-bottom: none;
+}
+
+.blocked-user__info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
 .btn--loading::before {
   content: '';
   display: inline-block;
