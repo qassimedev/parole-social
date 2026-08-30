@@ -14,7 +14,7 @@ import { getFirestoreInstance } from '../lib/firebase';
 import { doc, getDoc, type DocumentData } from 'firebase/firestore';
 import { describeError } from '../lib/errors';
 import { getAvatarUrl } from '../lib/profile';
-import { fetchPostsByAuthor, type Post } from '../lib/posts';
+import { fetchPostsByAuthor, linkifyHashtags, type Post } from '../lib/posts';
 import { isFollowing, toggleFollow } from '../lib/follows';
 import type { UserProfile } from '../lib/store';
 import {
@@ -60,7 +60,7 @@ function postMarkup(post: Post): string {
   const shareCount = Number(post.shareCount) || 0;
   return `
     <article class="post-card post-card--compact">
-      <p class="post-card__content">${escapeHtml(post.content)}</p>
+      <p class="post-card__content">${linkifyHashtags(escapeHtml(post.content))}</p>
       <span class="post-card__date muted">${escapeHtml(date)}</span>
       ${shareCount > 0 ? `<span class="post-card__shares muted">${shareCount} partage${shareCount > 1 ? 's' : ''}</span>` : ''}
     </article>

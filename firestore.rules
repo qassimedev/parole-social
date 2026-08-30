@@ -81,6 +81,37 @@ service cloud.firestore {
                 && isPostDataReadable(get(/databases/$(database)/documents/posts/$(postId)).data)));
     }
 
+    // ----------------------------------------------------------
+    // Hashtags (Phase 9 — Lot 1)
+    // Convention DÉTERMINISTE : un hashtag est stocké en MINUSCULES,
+    // SANS le caractère '#', composé uniquement de [0-9a-z_], de 1 à
+    // 32 caractères. L'extraction/normalisation est faite côté client ;
+    // la règle REFUSE toute valeur non normalisée (majuscules,
+    // accents, espaces, '#' inclus) : impossible d'introduire des tags
+    // « déguisés » qui contourneraient la normalisation.
+    // Le champ posts.hashtags reste OPTIONNEL (compatibilité posts
+    // existants) ; un tableau vide est accepté. La déduplication des
+    // doublons est côté client (le langage de règles n'offre pas
+    // d'itération : la validation est bornée, élément par élément).
+    function isValidHashtag(tag) {
+      return tag is string && tag.matches('^[0-9a-z_]{1,32}$');
+    }
+
+    function isValidHashtags(hts) {
+      return hts is list
+        && hts.size() <= 10
+        && (hts.size() == 0 || (isValidHashtag(hts[0])
+          && (hts.size() <= 1 || (isValidHashtag(hts[1])
+          && (hts.size() <= 2 || (isValidHashtag(hts[2])
+          && (hts.size() <= 3 || (isValidHashtag(hts[3])
+          && (hts.size() <= 4 || (isValidHashtag(hts[4])
+          && (hts.size() <= 5 || (isValidHashtag(hts[5])
+          && (hts.size() <= 6 || (isValidHashtag(hts[6])
+          && (hts.size() <= 7 || (isValidHashtag(hts[7])
+          && (hts.size() <= 8 || (isValidHashtag(hts[8])
+          && (hts.size() <= 9 || isValidHashtag(hts[9]))))))))))))))))))));
+    }
+
     function validReason(reason) {
       return reason in ['illegal', 'harassment', 'spam', 'hate', 'sexual', 'violence', 'doxxing', 'fraud', 'other'];
     }
@@ -165,23 +196,26 @@ service cloud.firestore {
         && request.resource.data.shareCount == 0
         && request.resource.data.createdAt is timestamp
         && request.resource.data.updatedAt is timestamp
+        && (!('hashtags' in request.resource.data) || isValidHashtags(request.resource.data.hashtags))
         && request.resource.data.keys().hasOnly([
           'authorId', 'authorName', 'content', 'type', 'visibility',
           'mediaPaths', 'createdAt', 'updatedAt', 'likeCount',
-          'commentCount', 'reportCount', 'shareCount', 'moderationStatus'
+          'commentCount', 'reportCount', 'shareCount', 'moderationStatus',
+          'hashtags'
         ]);
 
-      // L'auteur peut modifier contenu, visibilité et médias.
-      // Jamais les compteurs ni les champs de modération.
+      // L'auteur peut modifier contenu, visibilité, médias et
+      // hashtags. Jamais les compteurs ni les champs de modération.
       allow update: if isOwner(resource.data.authorId)
         && request.resource.data.diff(resource.data).affectedKeys()
-            .hasOnly(['content', 'visibility', 'mediaPaths', 'updatedAt'])
+            .hasOnly(['content', 'visibility', 'mediaPaths', 'hashtags', 'updatedAt'])
         && request.resource.data.authorId == resource.data.authorId
         && request.resource.data.moderationStatus == resource.data.moderationStatus
         && request.resource.data.likeCount == resource.data.likeCount
         && request.resource.data.commentCount == resource.data.commentCount
         && request.resource.data.reportCount == resource.data.reportCount
-        && request.resource.data.shareCount == resource.data.shareCount;
+        && request.resource.data.shareCount == resource.data.shareCount
+        && (!('hashtags' in request.resource.data) || isValidHashtags(request.resource.data.hashtags));
 
       // Suppression : uniquement l'auteur du post.
       allow delete: if isOwner(resource.data.authorId);

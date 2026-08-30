@@ -19,6 +19,7 @@ import { renderSettings, mountSettings } from './settings';
 import { renderModeration, mountModeration } from './moderation';
 import { renderUser, mountUser } from './user';
 import { renderNotifications, mountNotifications } from './notifications';
+import { renderHashtag, mountHashtag } from './hashtag';
 
 export function splashView(): string {
   return `
@@ -104,6 +105,10 @@ export function renderView(root: HTMLElement): void {
     case 'settings':
       root.innerHTML = renderSettings(ctx);
       mountSettings(root, ctx);
+      return;
+    case 'hashtag':
+      root.innerHTML = renderHashtag(ctx);
+      mountHashtag(root, ctx);
       return;
     case 'notifications':
       root.innerHTML = renderNotifications(ctx);

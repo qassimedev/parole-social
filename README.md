@@ -52,7 +52,7 @@ avec une décision traçable et susceptible d'appel.
   `users.shareCount`**, notification de type `share` au propriétaire du post
   partagé (jamais pour soi-même), bouton Partager / Partagé avec état optimiste
   dans le fil (miroir du like), compteur affiché sur les profils publics.
-- **Phase 7** (en cours) : fil d'abonnés — deux modes de fil dans l'accueil :
+- **Phase 7** (validée) : fil d'abonnés — deux modes de fil dans l'accueil :
   *Général* (posts publics + mes posts) et *Abonnés* (posts publics + posts
   `visibility='followers'` des utilisateurs suivis + mes posts). La visibilité
   des posts `followers` reste **exclusivement** tranchée par les règles
@@ -64,6 +64,15 @@ avec une décision traçable et susceptible d'appel.
   requête nécessite l'index composite `posts (authorId, moderationStatus,
   visibility)` (ajouté dans `firestore.indexes.json`). Aucune Cloud Function
   ajoutée ; `fetchFollowingIds` est réutilisé pour borner la requête.
+- **Phase 9 — Lot 1** (validée) : hashtags — champ optionnel `posts.hashtags`
+  (tableau `string[]` normalisé : minuscules, sans `#`, `[0-9a-z_]`, 1 à 32
+  caractères, au plus 10 éléments, vide accepté), extraction/normalisation
+  côté client (`extractHashtags`), validation stricte côté règles Firestore
+  (`isValidHashtags`, valeurs non normalisées refusées), affichage des hashtags
+  cliquables sur les posts et page `#/hashtag/{tag}` (requête
+  `hashtags array-contains` + `visibility == 'public'` +
+  `moderationStatus == 'visible'`, index composite dédié). Aucune collection
+  `hashtags` créée, aucune recherche full-text, aucune Cloud Function ajoutée.
 
 ---
 
@@ -140,14 +149,32 @@ dont `notificationCount` — sont épinglés lors des mises à jour client
 | Champ | Type | Qui écrit |
 |---|---|---|
 | authorId, content, type, visibility | string | auteur (création) |
-| visibility, content, mediaPaths | — | auteur (mise à jour) |
+| visibility, content, mediaPaths, hashtags | — | auteur (mise à jour) |
 | likeCount, commentCount, reportCount, shareCount | number | **jamais un client** (compteurs) |
 | moderationStatus, moderationReason, moderatorId, moderatedAt | — | **jamais un client** (Functions) |
+| hashtags (Phase 9 — Lot 1) | `string[]` **optionnel** | auteur (création ou mise à jour) |
 
 Lecture : visibilité (`public`/`followers`/`private`) + `moderationStatus == 'visible'`.
 Un post masqué n'est lisible que par son auteur et les modérateurs.
 Suppression : uniquement l'auteur (hard delete). Les modérateurs masquent via
 Functions (`moderatePost`).
+
+**Hashtags (Phase 9 — Lot 1)** : champ **optionnel** — un post existant sans
+`hashtags` reste valide et lisible. Convention déterministe, imposée par les
+règles (`isValidHashtags`) :
+- un tableau de chaînes **normalisées en minuscules, sans `#`**, composé
+  uniquement de `[0-9a-z_]`, de **1 à 32 caractères** ;
+- **au plus 10 éléments** (vide accepté) ;
+- toute valeur non normalisée (majuscules, accents, espaces, `#` inclus),
+  non string, trop longue ou hors plage est **refusée** par les règles —
+  impossible d'écrire un tag « déguisé » ;
+- l'extraction depuis le contenu est automatique côté client
+  (`extractHashtags` : `#tag` reconnus, tronqués aux 32 caractères, dédupliqués
+  dans l'ordre d'apparition). Un mot coupé par un caractère hors `[A-Za-z0-9_]`
+  (ex. `#légale` → `l`) reste un tag isolé valide : comportement documenté ;
+- l'affichage relie les hashtags vers leur page `#/hashtag/{tag}` sans
+  modifier le rendu existant. Aucune collection `hashtags` ne stocke de
+  registre global des tags.
 
 ### comments/{commentId}
 Comme les posts : lecture conditionnée à la lisibilité du post parent,
@@ -283,8 +310,10 @@ Journal append-only des actions administratives et de modération.
 - Lecture : **administrateurs uniquement**.
 
 ### Collections prévues pour les phases suivantes
-`appeals`, `messages`, `hashtags`, `creatorStats` sont déclarées en
-**deny-by-default** (aucun accès) jusqu'à leur implémentation.
+`appeals`, `messages`, `creatorStats` sont déclarées en **deny-by-default**
+(aucun accès) jusqu'à leur implémentation. La collection `hashtags` n'est **pas
+utilisée** : les hashtags vivent dans le champ optionnel `posts.hashtags`
+(Phase 9 — Lot 1) ; son `match` deny-by-default reste néanmoins en place.
 
 ## Rôles et permissions
 
@@ -371,6 +400,12 @@ fil *Abonnés* (`authorId in [moi, ...suivis]` + `moderationStatus == 'visible'`
 règles (la règle de lecture déréférence ces trois champs). Le fil *Général*
 repose toujours sur l'index existant `posts [visibility ASC, moderationStatus
 ASC]`, et la requête « mes posts » est mono-champ (`authorId`).
+
+La Phase 9 — Lot 1 (hashtags) ajoute **un** index composite, réellement requis
+par la page `#/hashtag/{tag}` : `posts (hashtags ASC, visibility ASC,
+moderationStatus ASC)`, pour la requête `hashtags array-contains` +
+`visibility == 'public'` + `moderationStatus == 'visible'` (même contrainte que
+le fil *Général*, étendue au tag). Aucun autre index n'est ajouté pour ce lot.
 
 Le correctif « visibilité des commentaires modérés » ajoute l'index composite
 `comments (postId ASC, moderationStatus ASC, createdAt ASC)`, réellement requis

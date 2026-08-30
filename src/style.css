@@ -551,6 +551,17 @@ select.field__input {
   line-height: 1.5;
 }
 
+.post-card__content .hashtag {
+  color: var(--color-accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.post-card__content .hashtag:hover,
+.post-card__content .hashtag:focus-visible {
+  text-decoration: underline;
+}
+
 .post-card__actions {
   display: flex;
   align-items: center;

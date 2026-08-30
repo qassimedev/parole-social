@@ -26,6 +26,10 @@
 // Phase 7 : bloc K (fil d'abonnés) — lecture des posts visibility='followers'
 // par un abonné OK, non-abonné refusé, auteur/modérateur/admin OK, et
 // requête collection followers sans fuite de données.
+// Phase 9 : bloc N (Hashtags, Lot 1) — champ posts.hashtags optionnel,
+// tableau normalisé [0-9a-z_] {1,32} × ≤ 10 accepté, valeurs
+// invalides/non normalisées/champs parasites refusés, update hashtags
+// valide/invalide, requête page hashtag conforme et sans fuite.
 // ============================================================
 
 import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
@@ -174,6 +178,12 @@ const SEED_POSTS = {
   post4: post('bob', 'Bob', 'public', 'hidden'),
   post5: post('bob', 'Bob', 'public'),
   post6: post('eve', 'Eve', 'public'),
+  // Hashtags (Phase 9 - Lot 1) : post public, post 'followers' et post
+  // 'private' portant le tag 'parole'. postHtag2/postHtag3 ne doivent
+  // JAMAIS remonter dans la requête publique de la page hashtag.
+  postHtag1: post('bob', 'Bob', 'public', 'visible', { hashtags: ['parole', 'liberte'] }),
+  postHtag2: post('alice', 'Alice', 'followers', 'visible', { hashtags: ['parole'] }),
+  postHtag3: post('alice', 'Alice', 'private', 'visible', { hashtags: ['parole'] }),
 };
 
 async function seed() {
@@ -1123,6 +1133,106 @@ test('M11 Un modérateur requête les commentaires totaux (postId seul) sans fui
   const ids = snap.docs.map((d) => d.id);
   if (!ids.includes('s_hidden') || !ids.includes('s_removed')) {
     throw new Error(`Le modérateur devrait voir tous les statuts : ${ids.join(', ')}`);
+  }
+});
+
+// ============================================================
+// N. Hashtags (Phase 9 - Lot 1)
+// Convention : posts.hashtags OPTIONNEL (compatibilité posts
+// existants), tableau de chaînes normalisées — minuscules, sans '#',
+// composé uniquement de [0-9a-z_], 1 à 32 caractères, au plus 10
+// éléments (MAX_HASHTAGS). Un tableau vide est ACCEPTÉ.
+// Les règles REFUSENT : un élément non string, une valeur non
+// normalisée (majuscules, accents, espaces, '#' inclus), une longueur
+// hors plage, plus de 10 éléments, un tableau absent-du-schéma (autre
+// type), et tout champ parasite. La lecture n'est pas affectée par
+// hashtags : la page hashtag interroge `hashtags array-contains` +
+// `visibility == 'public'` + `moderationStatus == 'visible'` (index
+// composite posts [hashtags, visibility, moderationStatus]) et ne
+// laisse fuiter aucun post non lisible (followers/private).
+// ============================================================
+test('N1  Création d’un post sans hashtags OK (champ optionnel)', async () => {
+  await expectAllowed(setDoc(doc(eve().firestore(), 'posts', 'ntest1'), post('eve', 'Eve', 'public')));
+});
+test('N2  Création avec hashtags valides OK', async () => {
+  await expectAllowed(setDoc(doc(eve().firestore(), 'posts', 'ntest2'),
+    post('eve', 'Eve', 'public', 'visible', { hashtags: ['parole', 'liberte', 'voix_off'] })));
+});
+test('N3  Tableau vide autorisé OK', async () => {
+  await expectAllowed(setDoc(doc(eve().firestore(), 'posts', 'ntest3'),
+    post('eve', 'Eve', 'public', 'visible', { hashtags: [] })));
+});
+test('N4  Trop de hashtags (11) REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'posts', 'ntest4'),
+    post('eve', 'Eve', 'public', 'visible', {
+      hashtags: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k'],
+    })));
+});
+test('N5  Élément non string (nombre) REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'posts', 'ntest5'),
+    post('eve', 'Eve', 'public', 'visible', { hashtags: ['ok', 42] })));
+});
+test('N6  hashtags pas un tableau (string) REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'posts', 'ntest6'),
+    post('eve', 'Eve', 'public', 'visible', { hashtags: 'parole' })));
+});
+test('N7  Hashtag invalide (espace/accent/trop long/vide) REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'posts', 'ntest7a'),
+    post('eve', 'Eve', 'public', 'visible', { hashtags: ['avec espace'] })));
+  await expectDenied(setDoc(doc(eve().firestore(), 'posts', 'ntest7b'),
+    post('eve', 'Eve', 'public', 'visible', { hashtags: ['accént'] })));
+  await expectDenied(setDoc(doc(eve().firestore(), 'posts', 'ntest7c'),
+    post('eve', 'Eve', 'public', 'visible', { hashtags: ['a'.repeat(33)] })));
+  await expectDenied(setDoc(doc(eve().firestore(), 'posts', 'ntest7d'),
+    post('eve', 'Eve', 'public', 'visible', { hashtags: [''] })));
+});
+test('N8  Format non normalisé (majuscules) REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'posts', 'ntest8'),
+    post('eve', 'Eve', 'public', 'visible', { hashtags: ['Parole'] })));
+});
+test('N9  Champ parasite à la création REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'posts', 'ntest9'),
+    post('eve', 'Eve', 'public', 'visible', { hashtags: ['ok'], hacked: 1 })));
+});
+test('N10 Mise à jour avec hashtags valides OK', async () => {
+  await expectAllowed(setDoc(doc(eve().firestore(), 'posts', 'ntest10'), post('eve', 'Eve', 'public')));
+  await expectAllowed(updateDoc(doc(eve().firestore(), 'posts', 'ntest10'),
+    { hashtags: ['nouveau'], updatedAt: new Date() }));
+});
+test('N11 Mise à jour avec hashtags invalides REFUS', async () => {
+  await expectAllowed(setDoc(doc(eve().firestore(), 'posts', 'ntest11'), post('eve', 'Eve', 'public')));
+  await expectDenied(updateDoc(doc(eve().firestore(), 'posts', 'ntest11'),
+    { hashtags: ['MAJUSCULE'], updatedAt: new Date() }));
+  await expectDenied(updateDoc(doc(eve().firestore(), 'posts', 'ntest11'),
+    { hashtags: ['a'.repeat(40)], updatedAt: new Date() }));
+});
+test('N12 Requête page hashtag conforme OK (postHtag1 présent)', async () => {
+  const snap = await getDocs(
+    query(
+      collection(eve().firestore(), 'posts'),
+      where('hashtags', 'array-contains', 'parole'),
+      where('visibility', '==', 'public'),
+      where('moderationStatus', '==', 'visible')
+    )
+  );
+  const ids = snap.docs.map((d) => d.id);
+  if (!ids.includes('postHtag1')) {
+    throw new Error(`La requête hashtag devrait contenir postHtag1 : ${ids.join(', ')}`);
+  }
+});
+test('N13 Aucune fuite via la requête hashtag (posts followers/private exclus)', async () => {
+  const snap = await getDocs(
+    query(
+      collection(eve().firestore(), 'posts'),
+      where('hashtags', 'array-contains', 'parole'),
+      where('visibility', '==', 'public'),
+      where('moderationStatus', '==', 'visible')
+    )
+  );
+  const ids = snap.docs.map((d) => d.id);
+  const leaked = ids.filter((id) => id === 'postHtag2' || id === 'postHtag3');
+  if (leaked.length > 0) {
+    throw new Error(`Fuite de posts non lisibles par la page hashtag : ${leaked.join(', ')}`);
   }
 });
 

@@ -18,6 +18,15 @@
       ]
     },
     {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "hashtags", "order": "ASC" },
+        { "fieldPath": "visibility", "order": "ASC" },
+        { "fieldPath": "moderationStatus", "order": "ASC" }
+      ]
+    },
+    {
       "collectionGroup": "reports",
       "queryScope": "COLLECTION",
       "fields": [

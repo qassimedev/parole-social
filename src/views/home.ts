@@ -3,6 +3,7 @@ import { notify } from '../lib/notify';
 import {
   createTextPost,
   fetchFeed,
+  linkifyHashtags,
   type FeedMode,
   type Post,
   type PostVisibility,
@@ -297,7 +298,7 @@ function postMarkup(post: Post, uid: string): string {
         </div>
         <div class="post-card__badges">${visibilityBadge}${moderationBadge}</div>
       </header>
-      <p class="post-card__content">${escapeHtml(post.content)}</p>
+      <p class="post-card__content">${linkifyHashtags(escapeHtml(post.content))}</p>
       <div class="post-card__actions">
         ${likeButton}
         ${shareButton}
