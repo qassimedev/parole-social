@@ -36,6 +36,8 @@ function parseHash(hash: string): Route {
     name = 'settings';
   } else if (segments[0] === 'notifications') {
     name = 'notifications';
+  } else if (segments[0] === 'search') {
+    name = 'search';
   } else if (segments[0] === 'hashtag') {
     name = 'hashtag';
     if (segments[1]) params.set('tag', segments[1]);

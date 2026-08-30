@@ -954,6 +954,7 @@ test('C7  registerUser : inscription valide + profil Firestore conforme', async 
     'followingCount',
     'notificationCount',
     'messageCount',
+    'searchTokens',
     'createdAt',
     'updatedAt',
   ].sort();
@@ -978,6 +979,16 @@ test('C7  registerUser : inscription valide + profil Firestore conforme', async 
   }
   if (data.notificationCount !== 0) {
     throw new Error('notificationCount devrait être initialisé à zéro.');
+  }
+  if (!data.searchTokens || !Array.isArray(data.searchTokens)) {
+    throw new Error('searchTokens devrait être un tableau initialisé par registerUser (Phase 9 - Lot 5).');
+  }
+  // Tokens dérivés du displayName trim 'Test Register' (même
+  // convention que src/lib/search.ts) : préfixes 2..bornés de chaque
+  // mot dédupliqués dans l'ordre, bornés à 12.
+  const expectedTokens = ['te', 'tes', 'test', 're', 'reg', 'regi', 'regis', 'regist', 'registe', 'register'];
+  if (JSON.stringify(data.searchTokens) !== JSON.stringify(expectedTokens)) {
+    throw new Error(`searchTokens inattendus : ${data.searchTokens.join(', ')}`);
   }
   if (!data.createdAt || !data.updatedAt) {
     throw new Error('createdAt/updatedAt devraient être renseignés.');

@@ -255,6 +255,33 @@ function isValidDisplayName(name: unknown): name is string {
   return typeof name === 'string' && name.trim().length >= 1 && name.trim().length <= 50;
 }
 
+// ------------------------------------------------------------
+// Tokens de recherche (Phase 9 - Lot 5). DÉRIVÉS du displayName,
+// même convention que `src/lib/search.ts` (client) et
+// `isValidSearchTokens` (firestore.rules) : minuscules, charset
+// [0-9a-z_], préfixes de chaque mot bornés à 2..12 caractères, au
+// plus 12 tokens par profil, dédupliqués dans l'ordre d'apparition.
+// Aucune donnée sensible n'est jamais dérivée en token.
+// ------------------------------------------------------------
+const MAX_SEARCH_TOKENS = 12;
+const MIN_TOKEN_LENGTH = 2;
+const MAX_TOKEN_LENGTH = 12;
+
+function buildSearchTokens(displayName: string): string[] {
+  const words = displayName.trim().toLowerCase().split(/[^0-9a-z_]+/).filter(Boolean);
+  const tokens: string[] = [];
+  for (const word of words) {
+    const maxLen = Math.min(word.length, MAX_TOKEN_LENGTH);
+    for (let len = MIN_TOKEN_LENGTH; len <= maxLen; len += 1) {
+      const prefix = word.slice(0, len);
+      if (tokens.includes(prefix)) continue;
+      tokens.push(prefix);
+      if (tokens.length >= MAX_SEARCH_TOKENS) return tokens;
+    }
+  }
+  return tokens;
+}
+
 // Limiteur de débit en mémoire (fenêtre glissante).
 // En production, ce dispositif doit être renforcé (quotas distribués
 // / CAPTCHA) — ici il protège déjà contre les créations abusives.
@@ -353,6 +380,7 @@ export const registerUser = onCall(
       followingCount: 0,
       notificationCount: 0,
       messageCount: 0,
+      searchTokens: buildSearchTokens(displayName),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });

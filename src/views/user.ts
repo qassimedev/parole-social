@@ -53,6 +53,7 @@ function snapshotToProfile(data: DocumentData): UserProfile {
     followingCount: typeof data.followingCount === 'number' ? data.followingCount : 0,
     notificationCount: typeof data.notificationCount === 'number' ? data.notificationCount : 0,
     messageCount: typeof data.messageCount === 'number' ? data.messageCount : 0,
+    searchTokens: Array.isArray(data.searchTokens) ? data.searchTokens.map(String) : [],
     createdAt: data.createdAt?.toDate?.() ?? new Date(),
     updatedAt: data.updatedAt?.toDate?.() ?? new Date(),
   };

@@ -1839,6 +1839,127 @@ test('Q31 Update direct par modérateur/admin REFUS (résolution exclusive via r
 });
 
 // ============================================================
+// Phase 9 - Lot 5 : Recherche (users.searchTokens)
+// Champ OPTIONNEL, tableau borné (≤ 12 éléments), chaque token =
+// string [0-9a-z_]{2,12} (majuscules/espaces/accents/ponctuation
+// refusés). Liage au displayName sur update : searchTokens ne peut
+// changer QUE lorsque displayName change. Lecture utilisée par la
+// recherche : un unique array-contains mono-champ (aucun index
+// composite). La requête `where('searchTokens','array-contains',t)`
+// est autorisée par la règle de lecture users (isSignedIn).
+// ============================================================
+test('R01 Création de profil SANS searchTokens OK (champ optionnel)', async () => {
+  const rnew = () => testEnv.authenticatedContext('rnew1');
+  await expectAllowed(setDoc(doc(rnew().firestore(), 'users', 'rnew1'), user('rnew1')));
+});
+test('R02 Création de profil AVEC searchTokens valides OK (préfixes d’alice lambert)', async () => {
+  const ralice = () => testEnv.authenticatedContext('ralice');
+  await expectAllowed(setDoc(doc(ralice().firestore(), 'users', 'ralice'),
+    user('ralice', 'user', { searchTokens: ['al', 'ali', 'alic', 'alice', 'la', 'lam', 'lamb', 'lambe', 'lamber', 'lambert'] })));
+});
+test('R03 searchTokens : tableau vide accepté', async () => {
+  const rempty = () => testEnv.authenticatedContext('rempty1');
+  await expectAllowed(setDoc(doc(rempty().firestore(), 'users', 'rempty1'),
+    user('rempty1', 'user', { searchTokens: [] })));
+});
+test('R04 searchTokens : plus de 12 éléments REFUS', async () => {
+  const r13 = () => testEnv.authenticatedContext('r13');
+  await expectDenied(setDoc(doc(r13().firestore(), 'users', 'r13'),
+    user('r13', 'user', { searchTokens: ['aa', 'ab', 'ac', 'ad', 'ae', 'af', 'ag', 'ah', 'ai', 'aj', 'ak', 'al', 'am'] })));
+});
+test('R05 searchTokens : non-tableau (chaîne) REFUS', async () => {
+  const rstr = () => testEnv.authenticatedContext('rstr1');
+  await expectDenied(setDoc(doc(rstr().firestore(), 'users', 'rstr1'),
+    user('rstr1', 'user', { searchTokens: 'alice' })));
+});
+test('R06 searchTokens : élément non-chaîne (nombre) REFUS', async () => {
+  const rnum = () => testEnv.authenticatedContext('rnum1');
+  await expectDenied(setDoc(doc(rnum().firestore(), 'users', 'rnum1'),
+    user('rnum1', 'user', { searchTokens: ['al', 42] })));
+});
+test('R07 searchTokens : token trop court (1 caractère) REFUS', async () => {
+  const r1 = () => testEnv.authenticatedContext('r1');
+  await expectDenied(setDoc(doc(r1().firestore(), 'users', 'r1'),
+    user('r1', 'user', { searchTokens: ['a', 'al'] })));
+});
+test('R08 searchTokens : token trop long (13 caractères) REFUS', async () => {
+  const rlng = () => testEnv.authenticatedContext('rlng1');
+  await expectDenied(setDoc(doc(rlng().firestore(), 'users', 'rlng1'),
+    user('rlng1', 'user', { searchTokens: ['alicewonderlah'] }))); // 13 caractères
+});
+test('R09 searchTokens : token en majuscules (non normalisé) REFUS', async () => {
+  const rmaj = () => testEnv.authenticatedContext('rmaj1');
+  await expectDenied(setDoc(doc(rmaj().firestore(), 'users', 'rmaj1'),
+    user('rmaj1', 'user', { searchTokens: ['Alice'] })));
+});
+test('R10 searchTokens : token contenant un espace REFUS', async () => {
+  const rsp = () => testEnv.authenticatedContext('rsp1');
+  await expectDenied(setDoc(doc(rsp().firestore(), 'users', 'rsp1'),
+    user('rsp1', 'user', { searchTokens: ['al ic'] })));
+});
+test('R11 searchTokens : token avec accent/ponctuation interdits REFUS', async () => {
+  const racc = () => testEnv.authenticatedContext('racc1');
+  await expectDenied(setDoc(doc(racc().firestore(), 'users', 'racc1'),
+    user('racc1', 'user', { searchTokens: ['léo'] })));
+  await expectDenied(setDoc(doc(racc().firestore(), 'users', 'racc2'),
+    user('racc2', 'user', { searchTokens: ['leo-'] })));
+});
+test('R12 Champ parasite à la création AVEC searchTokens valides REFUS (hasOnly)', async () => {
+  const rpar = () => testEnv.authenticatedContext('rpar1');
+  await expectDenied(setDoc(doc(rpar().firestore(), 'users', 'rpar1'),
+    { ...user('rpar1', 'user', { searchTokens: ['rp', 'rpa', 'rpar'] }), hacked: 1 }));
+});
+test('R13 Update : displayName SEUL (profil sans searchTokens) OK — non-régression', async () => {
+  await expectAllowed(updateDoc(doc(eve().firestore(), 'users', 'eve'), { displayName: 'Eve Recherche', updatedAt: new Date() }));
+});
+test('R14 Update : displayName + searchTokens cohérents OK', async () => {
+  const rup = () => testEnv.authenticatedContext('rup1');
+  await expectAllowed(setDoc(doc(rup().firestore(), 'users', 'rup1'), user('rup1')));
+  await expectAllowed(updateDoc(doc(rup().firestore(), 'users', 'rup1'),
+    { displayName: 'Rup1 Deux', searchTokens: ['ru', 'rup', 'rup1', 'de', 'deu', 'deux'], updatedAt: new Date() }));
+});
+test('R15 Update : searchTokens SANS displayName REFUS (liage)', async () => {
+  const rb1 = () => testEnv.authenticatedContext('rb1');
+  await expectAllowed(setDoc(doc(rb1().firestore(), 'users', 'rb1'), user('rb1')));
+  await expectDenied(updateDoc(doc(rb1().firestore(), 'users', 'rb1'),
+    { searchTokens: ['xx', 'xy'], updatedAt: new Date() }));
+});
+test('R16 Update : displayName + searchTokens NON valides REFUS', async () => {
+  const rb2 = () => testEnv.authenticatedContext('rb2');
+  await expectAllowed(setDoc(doc(rb2().firestore(), 'users', 'rb2'), user('rb2')));
+  await expectDenied(updateDoc(doc(rb2().firestore(), 'users', 'rb2'),
+    { displayName: 'Rb2', searchTokens: ['BAD VALUE'], updatedAt: new Date() }));
+});
+test('R17 Update : searchTokens sur le profil d’un AUTRE utilisateur REFUS', async () => {
+  await expectDenied(updateDoc(doc(bob().firestore(), 'users', 'eve'),
+    { displayName: 'Piratée', searchTokens: ['hack'], updatedAt: new Date() }));
+});
+test('R18 Recherche users array-contains autorisée, ciblée et sans fuite (ralice trouvé, alice sans tokens absente)', async () => {
+  const ralice = () => testEnv.authenticatedContext('ralice');
+  const snap = await getDocs(query(
+    collection(ralice().firestore(), 'users'),
+    where('searchTokens', 'array-contains', 'alice')
+  ));
+  const ids = snap.docs.map((d) => d.id);
+  if (!ids.includes('ralice')) {
+    throw new Error(`La recherche 'alice' devrait trouver ralice : ${ids.join(', ')}`);
+  }
+  if (ids.includes('alice')) {
+    throw new Error(`La recherche 'alice' ne devrait PAS renvoyer le profil seed alice (aucun searchTokens) : ${ids.join(', ')}`);
+  }
+  const leaked = snap.docs.filter((d) => !(d.data().searchTokens ?? []).includes('alice'));
+  if (leaked.length > 0) {
+    throw new Error(`Résultat sans le token cherché : ${leaked.map((d) => d.id).join(', ')}`);
+  }
+});
+test('R19 Recherche users par un utilisateur non authentifié REFUS', async () => {
+  await expectDenied(getDocs(query(
+    collection(anon().firestore(), 'users'),
+    where('searchTokens', 'array-contains', 'alice')
+  )));
+});
+
+// ============================================================
 // Exécution
 // ============================================================
 await seed();

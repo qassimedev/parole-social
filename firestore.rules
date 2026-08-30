@@ -178,6 +178,53 @@ service cloud.firestore {
           && (hts.size() <= 9 || isValidHashtag(hts[9]))))))))))))))))))));
     }
 
+    // ----------------------------------------------------------
+    // Phase 9 - Lot 5 (Recherche) : users.searchTokens — tableau
+    // OPTIONNEL de tokens de recherche normalisés, dérivés du
+    // displayName (préfixes bornés des mots : « alice » → « al »,
+    // « ali », « alic », « alice »). Format strict, identique côté
+    // client (`src/lib/search.ts`) et dans les tests : token =
+    // string, minuscules, charset [0-9a-z_] (NI espace, NI accent,
+    // NI ponctuation), longueur 2..12 ; au plus 12 tokens par
+    // profil ; un tableau vide est accepté. Aucune donnée sensible
+    // (email, uid, numéro de téléphone) n'est jamais dérivée en
+    // token. Le langage de règles ne peut PAS dériver les tokens du
+    // displayName (pas d'itération, pas de chaîne de caractères) :
+    // la re-normalisation est donc côté client + registerUser (Admin
+    // SDK), tandis que les règles imposent le format et le LIAGE :
+    // les tokens ne peuvent être modifiés QUE lorsque le displayName
+    // change lui aussi (un simple changement de displayName reste
+    // accepté, pour la compatibilité avec les profils existants).
+    function isValidSearchToken(token) {
+      return token is string && token.matches('^[0-9a-z_]{2,12}$');
+    }
+
+    function isValidSearchTokens(tokens) {
+      return tokens is list
+        && tokens.size() <= 12
+        && (tokens.size() == 0 || (isValidSearchToken(tokens[0])
+          && (tokens.size() <= 1 || (isValidSearchToken(tokens[1])
+          && (tokens.size() <= 2 || (isValidSearchToken(tokens[2])
+          && (tokens.size() <= 3 || (isValidSearchToken(tokens[3])
+          && (tokens.size() <= 4 || (isValidSearchToken(tokens[4])
+          && (tokens.size() <= 5 || (isValidSearchToken(tokens[5])
+          && (tokens.size() <= 6 || (isValidSearchToken(tokens[6])
+          && (tokens.size() <= 7 || (isValidSearchToken(tokens[7])
+          && (tokens.size() <= 8 || (isValidSearchToken(tokens[8])
+          && (tokens.size() <= 9 || (isValidSearchToken(tokens[9])
+          && (tokens.size() <= 10 || (isValidSearchToken(tokens[10])
+          && (tokens.size() <= 11 || isValidSearchToken(tokens[11]))))))))))))))))))))))));
+    }
+
+    function searchTokensValidIfPresent(data) {
+      return !('searchTokens' in data) || isValidSearchTokens(data.searchTokens);
+    }
+
+    function searchTokensUpdateMaintained(affectedKeys, tokens) {
+      return !('searchTokens' in affectedKeys)
+        || ('displayName' in affectedKeys && isValidSearchTokens(tokens));
+    }
+
     function validReason(reason) {
       return reason in ['illegal', 'harassment', 'spam', 'hate', 'sexual', 'violence', 'doxxing', 'fraud', 'other'];
     }
@@ -211,19 +258,26 @@ service cloud.firestore {
         && request.resource.data.messageCount == 0
         && request.resource.data.createdAt is timestamp
         && request.resource.data.updatedAt is timestamp
+        && searchTokensValidIfPresent(request.resource.data)
         && request.resource.data.keys().hasOnly([
           'uid', 'displayName', 'bio', 'avatarPath', 'createdAt',
           'updatedAt', 'role', 'banned', 'moderationStatus',
           'postCount', 'reportCount', 'likeCount',
           'followerCount', 'followingCount', 'notificationCount',
-          'messageCount'
+          'messageCount', 'searchTokens'
         ]);
 
       // Mise à jour par le propriétaire : champs de profil uniquement.
       // Interdit de toucher role, banned, moderationStatus, counters.
+      // `searchTokens` est accepté MAIS lié au displayName : il ne peut
+      // changer que lorsque le displayName change lui aussi (et reste
+      // soumis au format strict).
       allow update: if isOwner(userId)
         && request.resource.data.diff(resource.data).affectedKeys()
-            .hasOnly(['displayName', 'bio', 'avatarPath', 'updatedAt'])
+            .hasOnly(['displayName', 'bio', 'avatarPath', 'updatedAt', 'searchTokens'])
+        && searchTokensUpdateMaintained(
+            request.resource.data.diff(resource.data).affectedKeys(),
+            request.resource.data.searchTokens)
         && request.resource.data.uid == userId
         && request.resource.data.role == resource.data.role
         && request.resource.data.banned == resource.data.banned

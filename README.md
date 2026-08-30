@@ -120,6 +120,24 @@ avec une décision traçable et susceptible d'appel.
   recours avec pré-remplissage de la sanction + liste « Mes recours ») et
   section « Recours » dans la file de modération (boutons Accepter / Rejeter).
   **Aucun index composite ajouté.**
+- **Phase 9 — Lot 5** (validée) : recherche — champ **optionnel**
+  `users.searchTokens` (tableau `string[]` **dérivé du displayName** : tokens
+  normalisés en préfixes bornés de chaque mot — « Alice Lambert » →
+  `al`, `ali`, `alic`, `alice`, `la`, `lam`, … — minuscules, `[0-9a-z_]`,
+  2 à 12 caractères, au plus 12 tokens, tableau vide accepté). Page
+  `#/search` (paramètre `?q=` partageable) à deux sections : **Utilisateurs**
+  (unique requête `where('searchTokens','array-contains',token)` mono-champ,
+  **aucun index composite**) et **Hashtags/Posts** (réutilisation de
+  `fetchPostsByHashtag`, lien vers `#/hashtag/{tag}`). Les règles imposent le
+  format (`isValidSearchTokens`, valeurs non normalisées refusées) et le
+  **liage** au displayName (les `searchTokens` ne changent que si le
+  `displayName` change lui aussi) ; la **re-normalisation** est côté client
+  (`src/lib/search.ts`, ré-appliquée par `updateProfile`) et côté
+  `registerUser` (Admin SDK) — le langage de règles ne pouvant pas dériver
+  les tokens d'un nom. Aucune collection `search`/`hashtags` créée, aucune
+  recherche plein-texte, aucun moteur externe (Algolia/Typesense/…), aucune
+  recherche des messages/contenu privé, **aucune Cloud Function ajoutée**,
+  **aucun index composite ajouté**.
 
 ---
 
@@ -156,7 +174,7 @@ avec une décision traçable et susceptible d'appel.
 │ • auditLogs                 │   │ • onLike/Comment/Follow →   │
 │ Index composites minimaux   │   │   notification (Phase 5)    │
 │                             │   │ • onShare → notification    │
-│                             │   │   `share` (Phase 6)         │
+│ • recherche searchTokens    │   │   `share` (Phase 6)         │
 │                             │   │ • onNotificationCreated/    │
 │                             │   │   Updated/Deleted (cnt)     │
 │                             │   │ • onMessageCreated/Updated  │
@@ -184,6 +202,7 @@ directement ces données.
 | Champ | Type | Qui écrit |
 |---|---|---|
 | uid, displayName, bio, avatarPath | string | propriétaire |
+| searchTokens (Phase 9 — Lot 5) | `string[]` **optionnel** | propriétaire (dérivés du `displayName`, liés à lui) |
 | role (`user`/`moderator`/`admin`) | string | **jamais un client** (Functions) |
 | banned, bannedUntil, moderationStatus | bool/timestamp/string | **jamais un client** (Functions) |
 | postCount, reportCount, likeCount, followerCount, followingCount, notificationCount, messageCount | number | **jamais un client** (compteurs système) |
@@ -191,9 +210,22 @@ directement ces données.
 Lecture : tout utilisateur authentifié. Création : son propre profil uniquement
 (rôle forcé à `user`, `notificationCount` forcé à `0`, `messageCount` forcé à
 `0`). Mise à jour : champs de profil uniquement
-(`hasOnly(['displayName','bio','avatarPath','updatedAt'])`). Les compteurs —
-dont `notificationCount` et `messageCount` — sont épinglés lors des mises à
-jour client (strictement identiques, jamais modifiables par un client).
+(`hasOnly(['displayName','bio','avatarPath','updatedAt','searchTokens'])`). Les
+compteurs — dont `notificationCount` et `messageCount` — sont épinglés lors des
+mises à jour client (strictement identiques, jamais modifiables par un client).
+
+**searchTokens (Phase 9 — Lot 5)** : champ **optionnel** — un profil existant
+sans `searchTokens` (ainsi qu'un tableau vide) reste pleinement valide. Les
+tokens sont **dérivés du `displayName`** (préfixes bornés de chaque mot
+normalisé : minuscules, `[0-9a-z_]`, 2 à 12 caractères, au plus 12 tokens,
+dédupliqués dans l'ordre). Les règles **refusent toute valeur non normalisée**
+et imposent le **liage** : `searchTokens` ne peut être modifié que lorsque le
+`displayName` change lui aussi (un simple changement de `displayName` reste
+accepté, pour la compatibilité). La re-normalisation est appliquée côté client
+(`src/lib/search.ts`, ré-utilisée par `updateProfile`) et par `registerUser`
+(Admin SDK) — le langage de règles ne peut pas dériver les tokens d'un nom.
+Aucune donnée sensible (email, uid, numéro de téléphone) n'est jamais dérivée
+en token.
 
 ### posts/{postId}
 | Champ | Type | Qui écrit |
@@ -491,6 +523,7 @@ néanmoins en place.
 | Envoyer / lire des messages privés 1-à-1 (Phase 9 — Lot 3) | ✔ | ✔ | ✔ (lisent tout) |
 | Déposer / consulter ses recours (Phase 9 — Lot 4) | ✔ | ✔ | ✔ |
 | Traiter les recours (Phase 9 — Lot 4) | ✖ | ✔ (via Functions) | ✔ (via Functions) |
+| Rechercher utilisateurs / hashtags (Phase 9 — Lot 5) | ✔ | ✔ | ✔ |
 | Lire / marquer ses notifications | ✔ | ✔ | ✔ (admin : lit toutes) |
 | Modifier/supprimer ses propres contenus | ✔ | ✔ | ✔ |
 | Lire les posts publics | ✔ | ✔ | ✔ |
@@ -596,6 +629,12 @@ requêtes client sur `appeals` sont « mes recours » (`where appellantId == moi
 et « recours à traiter » (`where status == 'pending'`), toutes deux mono-champ —
 couvertes par les index automatiques des champs uniques.
 
+La Phase 9 — Lot 5 (recherche) n'ajoute **aucun** index composite : la seule
+requête client nouvelle est « match searchTokens » (`where searchTokens
+array-contains t` sur `users`), mono-champ — couverte par l'index automatique
+des champs uniques ; la recherche hashtags/posts réutilise l'index existant de
+la page `#/hashtag/{tag}`.
+
 Le correctif « visibilité des commentaires modérés » ajoute l'index composite
 `comments (postId ASC, moderationStatus ASC, createdAt ASC)`, réellement requis
 par la requête `fetchComments` (égalité `postId` + égalité `moderationStatus`
@@ -623,7 +662,7 @@ Ouvrir l'UI des émulateurs : http://localhost:4000
 npm run typecheck      # vérification TypeScript (frontend)
 npm run build          # build frontend
 npm run build:functions
-npm run test:rules     # tests de sécurité Firestore + Storage (329 tests, émulateurs)
+npm run test:rules     # tests de sécurité Firestore + Storage (348 tests, émulateurs)
 npm run test:functions # tests des Cloud Functions (63 tests, émulateurs)
 npm run test:all       # tout
 ```

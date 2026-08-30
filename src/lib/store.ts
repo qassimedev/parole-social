@@ -21,6 +21,7 @@ export interface UserProfile {
   followingCount: number;
   notificationCount: number;
   messageCount: number;
+  searchTokens: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -69,6 +70,7 @@ async function loadProfile(uid: string): Promise<UserProfile | null> {
       followingCount: data.followingCount ?? 0,
       notificationCount: data.notificationCount ?? 0,
       messageCount: data.messageCount ?? 0,
+      searchTokens: Array.isArray(data.searchTokens) ? data.searchTokens.map(String) : [],
       createdAt: data.createdAt?.toDate() ?? new Date(),
       updatedAt: data.updatedAt?.toDate() ?? new Date(),
     };

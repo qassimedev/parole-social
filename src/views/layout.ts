@@ -97,6 +97,7 @@ export function appShell(
         </a>
         <nav class="nav" aria-label="Navigation principale">
           ${link('home', '#/', 'Accueil')}
+          ${link('search', '#/search', 'Recherche')}
           ${messagesLink}
           ${notificationsLink}
           ${link('appeals', '#/appeals', 'Recours')}

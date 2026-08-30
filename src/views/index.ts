@@ -23,6 +23,7 @@ import { renderHashtag, mountHashtag } from './hashtag';
 import { renderInbox, mountInbox } from './inbox';
 import { renderConversation, mountConversation } from './conversation';
 import { renderAppeals, mountAppeals } from './appeals';
+import { renderSearch, mountSearch } from './search';
 
 export function splashView(): string {
   return `
@@ -138,6 +139,10 @@ export function renderView(root: HTMLElement): void {
     case 'appeals':
       root.innerHTML = renderAppeals(ctx);
       mountAppeals(root, ctx);
+      return;
+    case 'search':
+      root.innerHTML = renderSearch(ctx);
+      mountSearch(root, ctx);
       return;
     case 'home':
     default:
