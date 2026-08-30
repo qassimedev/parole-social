@@ -55,7 +55,7 @@ export function renderHashtag(ctx: ViewContext): string {
       </div>
     </section>
   `;
-  return appShell(inner, '', isModeratorRole(session.profile?.role), session.profile?.notificationCount ?? 0);
+  return appShell(inner, '', isModeratorRole(session.profile?.role), session.profile?.notificationCount ?? 0, session.profile?.messageCount ?? 0);
 }
 
 export function mountHashtag(root: HTMLElement, ctx: ViewContext): void {

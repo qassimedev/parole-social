@@ -429,7 +429,7 @@ export function renderHome(ctx: ViewContext): string {
       </a>
     </section>
   `;
-  return appShell(inner, 'home', isModeratorRole(session.profile?.role), session.profile?.notificationCount ?? 0);
+  return appShell(inner, 'home', isModeratorRole(session.profile?.role), session.profile?.notificationCount ?? 0, session.profile?.messageCount ?? 0);
 }
 
 export function mountHome(root: HTMLElement, ctx: ViewContext): void {

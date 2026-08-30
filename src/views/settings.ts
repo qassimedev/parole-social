@@ -171,7 +171,7 @@ export function renderSettings(ctx: ViewContext): string {
       </p>
     </section>
   `;
-  return appShell(inner, 'settings', isModeratorRole(profile?.role), profile?.notificationCount ?? 0);
+  return appShell(inner, 'settings', isModeratorRole(profile?.role), profile?.notificationCount ?? 0, profile?.messageCount ?? 0);
 }
 
 export function mountSettings(root: HTMLElement, ctx: ViewContext): void {

@@ -18,6 +18,7 @@ import { getAvatarUrl } from '../lib/profile';
 import { fetchPostsByAuthor, linkifyHashtags, type Post } from '../lib/posts';
 import { isFollowing, toggleFollow } from '../lib/follows';
 import { blockUser, isUserBlocked, unblockUser } from '../lib/blocks';
+import { buildConversationId } from '../lib/messages';
 import type { UserProfile } from '../lib/store';
 import {
   appShell,
@@ -51,6 +52,7 @@ function snapshotToProfile(data: DocumentData): UserProfile {
     followerCount: typeof data.followerCount === 'number' ? data.followerCount : 0,
     followingCount: typeof data.followingCount === 'number' ? data.followingCount : 0,
     notificationCount: typeof data.notificationCount === 'number' ? data.notificationCount : 0,
+    messageCount: typeof data.messageCount === 'number' ? data.messageCount : 0,
     createdAt: data.createdAt?.toDate?.() ?? new Date(),
     updatedAt: data.updatedAt?.toDate?.() ?? new Date(),
   };
@@ -86,7 +88,7 @@ export function renderUser(ctx: ViewContext): string {
         <h2 class="card__title">Profil introuvable</h2>
         <p class="muted">Utilisateur non spécifié.</p>
       </section>
-    `, 'user', isModeratorRole(session.profile?.role), session.profile?.notificationCount ?? 0);
+    `, 'user', isModeratorRole(session.profile?.role), session.profile?.notificationCount ?? 0, session.profile?.messageCount ?? 0);
   }
   const inner = `
     <section class="card">
@@ -96,7 +98,7 @@ export function renderUser(ctx: ViewContext): string {
       </div>
     </section>
   `;
-  return appShell(inner, 'user', isModeratorRole(session.profile?.role), session.profile?.notificationCount ?? 0);
+  return appShell(inner, 'user', isModeratorRole(session.profile?.role), session.profile?.notificationCount ?? 0, session.profile?.messageCount ?? 0);
 }
 
 export function mountUser(root: HTMLElement, ctx: ViewContext): void {
@@ -180,6 +182,22 @@ export function mountUser(root: HTMLElement, ctx: ViewContext): void {
       </button>
     `;
 
+      // Messagerie (Lot 3) : bouton « Envoyer un message » vers la
+      // conversation déterministe. Masqué si je bloque/débloque cette
+      // personne : le blocage est bidirectionnel côté règles, l'envoi
+      // serait refusé. (Si c'EST l'autre qui me bloque, je ne peux pas
+      // le savoir — la règle refuse l'envoi ; l'historique reste lisible.)
+      const messageButton = isSelf
+        ? ``
+        : blockedState
+          ? `<p class="muted small">Messagerie désactivée : un blocage est en place.</p>`
+          : `
+      <button type="button" id="user-message" class="btn btn--ghost"
+        data-user-id="${escapeHtml(profile.uid)}">
+        <span class="btn__label">Envoyer un message</span>
+      </button>
+    `;
+
       container.innerHTML = `
         <div class="profile-header">
           <div id="user-avatar-slot">${avatarMarkup(avatarUrl, profile.displayName, 'lg')}</div>
@@ -196,7 +214,7 @@ export function mountUser(root: HTMLElement, ctx: ViewContext): void {
           <dt>Abonnements</dt><dd id="user-following-count">${Number(profile.followingCount) || 0}</dd>
           <dt>Abonnés</dt><dd id="user-follower-count">${Number(profile.followerCount) || 0}</dd>
         </dl>
-        <div class="actions">${followButton}${blockButton}</div>
+        <div class="actions">${followButton}${blockButton}${messageButton}</div>
         <h3 class="card__title card__title--sm">Publications récentes</h3>
         <div class="post-feed" id="user-posts">
           <div class="muted">Chargement des publications…</div>
@@ -286,6 +304,16 @@ export function mountUser(root: HTMLElement, ctx: ViewContext): void {
           } finally {
             blockBtn.disabled = false;
           }
+        });
+      }
+
+      // Bouton « Envoyer un message » : ouvre la conversation
+      // déterministe (l'ID est construit ici, le peer est transmis
+      // pour recréer la conversation si nécessaire).
+      const messageBtn = container.querySelector<HTMLButtonElement>('#user-message');
+      if (messageBtn && ctx) {
+        messageBtn.addEventListener('click', () => {
+          ctx.navigate(`#/messages/${buildConversationId(uid, profile.uid)}?peer=${escapeHtml(profile.uid)}`);
         });
       }
     } catch (err) {

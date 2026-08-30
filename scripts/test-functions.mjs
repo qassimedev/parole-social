@@ -22,6 +22,14 @@
 //     onShareDeleted maintiennent posts.shareCount (+1/-1), sans
 //     aucun compteur users.shareCount, et créent une notification
 //     « share » au propriétaire du post (jamais pour un self-share).
+//   - Déclencheurs de messagerie privée (Phase 9 - Lot 3) :
+//     onMessageCreated actualise la conversation (lastMessageAt /
+//     lastMessagePreview / lastSenderId, preview normalisée puis
+//     tronquée à 80), incrémente users.messageCount du DESTINATAIRE
+//     (+1, jamais l'expéditeur) et crée une notification « message » ;
+//     onMessageUpdated décrémente EXACTEMENT un non-lu au passage
+//     non lu -> lu, de façon idempotente et jamais en dessous de 0 ;
+//     une conversation mal formée n'a aucun effet (défensif).
 //   - Callable moderatePost : masquer/rétablir/maintenir/retirer un
 //     post, résoudre les signalements, tracer dans auditLogs.
 //   - Callable sanctionUser : warn/ban/unban/setRole + auditLogs.
@@ -107,6 +115,7 @@ async function seedProfile(uid, role) {
     followerCount: 0,
     followingCount: 0,
     notificationCount: 0,
+    messageCount: 0,
     createdAt: T.createdAt,
     updatedAt: T.createdAt,
   });
@@ -903,6 +912,7 @@ test('C7  registerUser : inscription valide + profil Firestore conforme', async 
     'followerCount',
     'followingCount',
     'notificationCount',
+    'messageCount',
     'createdAt',
     'updatedAt',
   ].sort();
@@ -1370,6 +1380,171 @@ test('D5 sanctionUser (admin) : avertir un utilisateur résout ses signalements 
     throw new Error('La file de modération utilisateur devrait être résolue.');
   }
   await signOut(auth);
+});
+
+// ------------------------------------------------------------
+// Messagerie privée (Phase 9 - Lot 3)
+// users.messageCount (messages NON LUS reçus) est maintenu
+// EXCLUSIVEMENT par onMessageCreated (incrément du destinataire +
+// notification « message » + actualisation de la conversation) et
+// onMessageUpdated (décrément EXACTEMENT unitaire et idempotent au
+// passage non lu -> lu, borné à >= 0). Jamais pour l'expéditeur.
+// ------------------------------------------------------------
+async function seedConversation(a, b, overrides = {}) {
+  const participants = [a, b].sort();
+  const id = participants.join('_');
+  await db.doc(`conversations/${id}`).set({
+    participants,
+    createdAt: T.createdAt,
+    lastMessageAt: null,
+    lastMessagePreview: '',
+    lastSenderId: '',
+    ...overrides,
+  });
+  return id;
+}
+
+async function seedMessage(conversationId, senderId, content, overrides = {}) {
+  return db.collection('messages').add({
+    conversationId,
+    senderId,
+    content,
+    read: false,
+    readAt: null,
+    moderationStatus: 'visible',
+    createdAt: T.createdAt,
+    ...overrides,
+  });
+}
+
+test('MSG1 onMessageCreated : conversation actualisée + messageCount du destinataire +1 (jamais l’expéditeur)', async () => {
+  await seedProfile('msgAlice1', 'user');
+  await seedProfile('msgBob1', 'user');
+  const convId = await seedConversation('msgAlice1', 'msgBob1');
+
+  await seedMessage(convId, 'msgAlice1', 'Bonjour Bob !');
+
+  await waitFor(async () => {
+    const snap = await db.doc('users/msgBob1').get();
+    return snap.data()?.messageCount === 1;
+  });
+  const senderSnap = await db.doc('users/msgAlice1').get();
+  if (senderSnap.data()?.messageCount !== 0) {
+    throw new Error(`L'expéditeur ne devrait jamais recevoir de +1 : ${senderSnap.data()?.messageCount}`);
+  }
+
+  const conv = await db.doc(`conversations/${convId}`).get();
+  if (conv.data()?.lastMessagePreview !== 'Bonjour Bob !' || conv.data()?.lastSenderId !== 'msgAlice1') {
+    throw new Error(`Conversation non actualisée : ${JSON.stringify(conv.data())}`);
+  }
+  if (typeof conv.data()?.lastMessageAt?.toDate !== 'function') {
+    throw new Error('lastMessageAt devrait être un serveur timestamp.');
+  }
+
+  const docs = await waitFor(async () => {
+    const snap = await db.collection('notifications')
+      .where('recipientId', '==', 'msgBob1')
+      .where('type', '==', 'message')
+      .get();
+    const found = snap.docs.filter((d) => d.data().actorId === 'msgAlice1');
+    return found.length > 0 ? found : null;
+  });
+  const n = docs[0].data();
+  if (n.read !== false || n.readAt !== null || n.postId !== '' || n.commentId !== '') {
+    throw new Error(`Notification message incohérente : ${JSON.stringify(n)}`);
+  }
+});
+
+test('MSG2 onMessageCreated : preview normalisée (retours/espaces écrases) puis tronquée à 80', async () => {
+  await seedProfile('msgAlice2', 'user');
+  await seedProfile('msgBob2', 'user');
+  const convId = await seedConversation('msgAlice2', 'msgBob2');
+
+  const raw = `  Première ligne   \n  deuxième\tligne   ${'x'.repeat(100)}`;
+  const expected = raw.replace(/\s+/g, ' ').trim().slice(0, 80);
+  await seedMessage(convId, 'msgAlice2', raw);
+
+  await waitFor(async () => {
+    const conv = await db.doc(`conversations/${convId}`).get();
+    return conv.data()?.lastMessagePreview === expected;
+  });
+});
+
+test('MSG3 onMessageUpdated : marquage lu → messageCount -1', async () => {
+  await seedProfile('msgAlice3', 'user');
+  await seedProfile('msgBob3', 'user');
+  const convId = await seedConversation('msgAlice3', 'msgBob3');
+
+  const msgRef = await seedMessage(convId, 'msgAlice3', 'Coucou Bob');
+  await waitFor(async () => {
+    const snap = await db.doc('users/msgBob3').get();
+    return snap.data()?.messageCount === 1;
+  });
+
+  await msgRef.update({ read: true, readAt: T.createdAt });
+  await waitFor(async () => {
+    const snap = await db.doc('users/msgBob3').get();
+    return snap.data()?.messageCount === 0;
+  });
+});
+
+test('MSG4 onMessageUpdated : idempotent (re-marquage sans décrément) et jamais négatif', async () => {
+  await seedProfile('msgAlice4', 'user');
+  await seedProfile('msgBob4', 'user');
+  const convId = await seedConversation('msgAlice4', 'msgBob4');
+
+  const msgRef = await seedMessage(convId, 'msgAlice4', 'Encore un message');
+  await waitFor(async () => {
+    const snap = await db.doc('users/msgBob4').get();
+    return snap.data()?.messageCount === 1;
+  });
+
+  await msgRef.update({ read: true, readAt: T.createdAt });
+  await waitFor(async () => {
+    const snap = await db.doc('users/msgBob4').get();
+    return snap.data()?.messageCount === 0;
+  });
+
+  // Idempotence : re-marquage d'un message déjà lu → aucun second décrément.
+  await msgRef.update({ read: true, readAt: new Date('2026-02-01T00:00:00Z') });
+  await sleep(1500);
+  let snap = await db.doc('users/msgBob4').get();
+  if (snap.data()?.messageCount !== 0) {
+    throw new Error(`messageCount devrait rester 0 après re-marquage : ${snap.data()?.messageCount}`);
+  }
+
+  // Borne >= 0 : compteur remis artificiellement à 0 puis passage
+  // non lu -> lu → aucun décrément négatif.
+  await db.doc('users/msgBob4').update({ messageCount: 0 });
+  await msgRef.update({ read: false, readAt: null });
+  await msgRef.update({ read: true, readAt: T.createdAt });
+  await sleep(1500);
+  snap = await db.doc('users/msgBob4').get();
+  const count = snap.data()?.messageCount;
+  if (typeof count !== 'number' || count < 0) {
+    throw new Error(`messageCount ne devrait jamais être négatif : ${count}`);
+  }
+});
+
+test('MSG5 onMessageCreated : conversation mal formée → aucun effet (défensif)', async () => {
+  await seedProfile('msgAlone', 'user');
+  // participants identiques : resolveMessageRecipient renvoie null.
+  const convId = await seedConversation('msgAlone', 'msgAlone');
+
+  await seedMessage(convId, 'msgAlone', 'Message perdu');
+
+  await sleep(1500);
+  const conv = await db.doc(`conversations/${convId}`).get();
+  if (conv.data()?.lastMessageAt !== null || conv.data()?.lastMessagePreview !== '') {
+    throw new Error(`La conversation mal formée ne devrait pas être actualisée : ${JSON.stringify(conv.data())}`);
+  }
+  const notifs = await db.collection('notifications')
+    .where('recipientId', '==', 'msgAlone')
+    .where('type', '==', 'message')
+    .get();
+  if (!notifs.empty) {
+    throw new Error('Aucune notification ne devrait être créée pour une conversation invalide.');
+  }
 });
 
 // ------------------------------------------------------------

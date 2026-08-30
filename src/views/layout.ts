@@ -60,13 +60,18 @@ export function authShell(inner: string): string {
 // `notificationCount` alimente EXCLUSIVEMENT le badge Notifications
 // (source : users.notificationCount, maintenu côté serveur). Le
 // badge disparaît quand le compteur vaut 0.
+// `messageCount` alimente EXCLUSIVEMENT le badge Messages
+// (source : users.messageCount = messages non lus reçus, maintenu
+// côté serveur). Même motif : badge caché à zéro.
 export function appShell(
   inner: string,
   active = '',
   canModerate = false,
-  notificationCount = 0
+  notificationCount = 0,
+  messageCount = 0
 ): string {
   const count = Number.isFinite(notificationCount) ? Math.max(0, notificationCount) : 0;
+  const mcount = Number.isFinite(messageCount) ? Math.max(0, messageCount) : 0;
   const link = (name: string, href: string, label: string) =>
     `<a class="nav__link${active === name ? ' nav__link--active' : ''}" href="${href}">${label}</a>`;
   // Badge toujours présent dans le DOM (id stable) pour que les vues
@@ -75,6 +80,12 @@ export function appShell(
     <a class="nav__link${active === 'notifications' ? ' nav__link--active' : ''}" href="#/notifications">
       Notifications
       <span class="nav__badge" id="nav-notifications-badge" data-count="${count}" ${count > 0 ? '' : 'hidden'}>${count > 0 ? count : 0}</span>
+    </a>
+  `;
+  const messagesLink = `
+    <a class="nav__link${active === 'messages' ? ' nav__link--active' : ''}" href="#/messages">
+      Messages
+      <span class="nav__badge" id="nav-messages-badge" data-count="${mcount}" ${mcount > 0 ? '' : 'hidden'}>${mcount > 0 ? mcount : 0}</span>
     </a>
   `;
   return `
@@ -86,6 +97,7 @@ export function appShell(
         </a>
         <nav class="nav" aria-label="Navigation principale">
           ${link('home', '#/', 'Accueil')}
+          ${messagesLink}
           ${notificationsLink}
           ${link('profile', '#/profile', 'Profil')}
           ${link('settings', '#/settings', 'Paramètres')}

@@ -1044,6 +1044,153 @@ code {
   gap: 0.5rem;
 }
 
+.notification-item__link {
+  margin: 0.15rem 0;
+}
+
+.notification-item__link a {
+  color: var(--color-accent);
+  font-size: 0.875rem;
+  text-decoration: underline;
+}
+
+/* ------------------------------------------------------------
+   Messagerie (Phase 9 — Lot 3)
+   ------------------------------------------------------------ */
+
+.inbox__status,
+.inbox__error,
+.inbox__empty,
+.conversation__status,
+.conversation__error,
+.conversation__empty {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 1rem 0.25rem;
+}
+
+.inbox-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 0.25rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.inbox-row:last-child {
+  border-bottom: none;
+}
+
+.inbox-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.inbox-row__main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.inbox-row__name {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.inbox-row__preview {
+  font-size: 0.85rem;
+  color: var(--color-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 42rem;
+}
+
+.inbox-row__date {
+  flex-shrink: 0;
+  font-size: 0.78rem;
+}
+
+.conversation-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-height: 55vh;
+  min-height: 8rem;
+  overflow-y: auto;
+  padding: 0.6rem 0.25rem;
+  margin: 0.6rem 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.message-row {
+  display: flex;
+}
+
+.message-row--mine {
+  justify-content: flex-end;
+}
+
+.message-row--theirs {
+  justify-content: flex-start;
+}
+
+.message-bubble {
+  max-width: 78%;
+  padding: 0.55rem 0.75rem;
+  border-radius: 0.75rem;
+  background: rgba(255, 255, 255, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.message-row--mine .message-bubble {
+  background: rgba(233, 69, 96, 0.18);
+}
+
+.message-row--read .message-bubble {
+  opacity: 0.85;
+}
+
+.message-bubble__author {
+  font-size: 0.75rem;
+}
+
+.message-bubble__content {
+  margin: 0;
+  font-size: 0.93rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.message-bubble__date {
+  font-size: 0.72rem;
+}
+
+.conversation-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.conversation-composer__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.conversation-composer textarea {
+  resize: vertical;
+}
+
 @media (max-width: 520px) {
   .topbar {
     padding: 0.6rem 0.75rem;

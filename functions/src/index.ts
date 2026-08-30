@@ -14,7 +14,7 @@ import {
 import * as logger from 'firebase-functions/logger';
 
 // ============================================================
-// PAROLE - Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6)
+// PAROLE - Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 + Phase 9 Lot 3)
 //
 // Phase 1 : les données sensibles (role, banned, statuts de
 // modération, compteurs système, résolutions de signalements,
@@ -177,7 +177,7 @@ async function resolveTargetReports(params: {
 // créer, ni les supprimer (règles Firestore). Champs STRICTEMENT
 // présents à chaque création. Aucune notification à soi-même.
 // ------------------------------------------------------------
-const NOTIFICATION_TYPES = ['like', 'comment', 'follow', 'share', 'reply'] as const;
+const NOTIFICATION_TYPES = ['like', 'comment', 'follow', 'share', 'reply', 'message'] as const;
 type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
 async function createNotification(params: {
@@ -333,6 +333,7 @@ export const registerUser = onCall(
       followerCount: 0,
       followingCount: 0,
       notificationCount: 0,
+      messageCount: 0,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -1083,6 +1084,118 @@ export const onNotificationDeleted = onDocumentDeleted(
     }
   }
 );
+
+// ------------------------------------------------------------
+// Messagerie (Phase 9 — Lot 3) — compteur users.messageCount
+// Maintenu EXCLUSIVEMENT ici (Admin SDK). Le client ne peut jamais
+// le modifier (règles Firestore). users.messageCount = nombre de
+// messages NON LUS reçus (alimente le badge Messages de la nav).
+// - onMessageCreated : actualise la conversation (lastMessageAt /
+//   lastMessagePreview / lastSenderId — état exclusivement serveur),
+//   incrémente users/{destinataire}.messageCount (+1) et crée une
+//   notification de type « message » au DESTINATAIRE (jamais pour
+//   soi-même — un message n'est jamais auto-adressé).
+// - onMessageUpdated : décrémente users/{destinataire}.messageCount
+//   (-1) au passage EXACT non lue -> lue (idempotent : une
+//   notification déjà lue ne redécrémente jamais ; le passage
+//   lue -> non lue est déjà refusé par les règles). Borné à >= 0.
+// ------------------------------------------------------------
+
+// Retourne l'id de l'AUTRE participant de la conversation (le
+// destinataire du message), ou null si la conversation n'existe
+// pas / est mal formée / reference seulement l'expéditeur.
+async function resolveMessageRecipient(
+  conversationId: string,
+  senderId: string
+): Promise<string | null> {
+  const convSnap = await db.doc(`conversations/${conversationId}`).get();
+  if (!convSnap.exists) {
+    return null;
+  }
+  const participants = convSnap.data()?.participants as unknown;
+  if (!Array.isArray(participants) || participants.length !== 2) {
+    return null;
+  }
+  const [p0, p1] = participants;
+  if (typeof p0 !== 'string' || typeof p1 !== 'string') {
+    return null;
+  }
+  if (p0 === senderId) {
+    return p1 === senderId ? null : p1;
+  }
+  return p0;
+}
+
+export const onMessageCreated = onDocumentCreated('messages/{messageId}', async (event) => {
+  const data = event.data?.data();
+  const conversationId = data?.conversationId as string | undefined;
+  const senderId = data?.senderId as string | undefined;
+  const content = typeof data?.content === 'string' ? data.content : '';
+  if (!conversationId || !senderId) {
+    return;
+  }
+
+  // Destinataire : l'autre participant de la conversation.
+  const recipientId = await resolveMessageRecipient(conversationId, senderId);
+  if (!recipientId) {
+    return;
+  }
+
+  // Actualisation de la conversation + incrément du compteur de
+  // messages non lus du DESTINATAIRE (batch atomique).
+  const preview = content.replace(/\s+/g, ' ').trim().slice(0, 80);
+  const batch = db.batch();
+  batch.update(db.doc(`conversations/${conversationId}`), {
+    lastMessageAt: serverTimestamp(),
+    lastMessagePreview: preview,
+    lastSenderId: senderId,
+  });
+
+  const recipientSnap = await db.doc(`users/${recipientId}`).get();
+  if (recipientSnap.exists) {
+    batch.update(recipientSnap.ref, { messageCount: FieldValue.increment(1) });
+  }
+
+  await batch.commit();
+
+  // Notification « X vous a envoyé un message » (jamais pour soi).
+  await createNotification({ recipientId, actorId: senderId, type: 'message' });
+
+  logger.info(`Message recorded from ${senderId} to ${recipientId} in ${conversationId}`);
+});
+
+export const onMessageUpdated = onDocumentUpdated('messages/{messageId}', async (event) => {
+  const before = event.data?.before.data();
+  const after = event.data?.after.data();
+  const conversationId = after?.conversationId as string | undefined;
+  const senderId = after?.senderId as string | undefined;
+  if (!conversationId || !senderId) {
+    return;
+  }
+
+  // Décrément EXACTEMENT unitaire : uniquement au passage non lu ->
+  // lue. Une notification déjà lue avant/après ne provoque jamais de
+  // nouveau décrément (idempotence).
+  if (before?.read !== false || after?.read !== true) {
+    return;
+  }
+
+  const recipientId = await resolveMessageRecipient(conversationId, senderId);
+  if (!recipientId) {
+    return;
+  }
+
+  const recipientSnap = await db.doc(`users/${recipientId}`).get();
+  if (!recipientSnap.exists) {
+    return;
+  }
+  const current = recipientSnap.data()?.messageCount as number | undefined;
+  // Borné à >= 0 : défense contre une éventuelle dérive.
+  if (typeof current === 'number' && current > 0) {
+    await recipientSnap.ref.update({ messageCount: FieldValue.increment(-1) });
+    logger.info(`Message marked read by user ${recipientId}`);
+  }
+});
 
 // ------------------------------------------------------------
 // Santé du service

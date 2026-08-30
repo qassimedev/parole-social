@@ -39,6 +39,13 @@ function parseHash(hash: string): Route {
   } else if (segments[0] === 'hashtag') {
     name = 'hashtag';
     if (segments[1]) params.set('tag', segments[1]);
+  } else if (segments[0] === 'messages') {
+    if (segments[1]) {
+      name = 'conversation';
+      params.set('conversationId', segments[1]);
+    } else {
+      name = 'messages';
+    }
   } else if (segments[0] === 'moderation') {
     name = 'moderation';
   } else {

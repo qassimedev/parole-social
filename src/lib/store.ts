@@ -20,6 +20,7 @@ export interface UserProfile {
   followerCount: number;
   followingCount: number;
   notificationCount: number;
+  messageCount: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -67,6 +68,7 @@ async function loadProfile(uid: string): Promise<UserProfile | null> {
       followerCount: data.followerCount ?? 0,
       followingCount: data.followingCount ?? 0,
       notificationCount: data.notificationCount ?? 0,
+      messageCount: data.messageCount ?? 0,
       createdAt: data.createdAt?.toDate() ?? new Date(),
       updatedAt: data.updatedAt?.toDate() ?? new Date(),
     };
@@ -125,6 +127,18 @@ export const store = {
     currentSession = {
       ...currentSession,
       profile: { ...profile, notificationCount: safeCount },
+    };
+  },
+  // Même principe pour users.messageCount (badge Messages de la nav) :
+  // copie en mémoire rafraîchie après marquage de messages comme lus.
+  setMessageCount(uid: string, count: number): void {
+    if (currentSession.uid !== uid || !currentSession.profile) return;
+    const profile = currentSession.profile;
+    const safeCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+    if (profile.messageCount === safeCount) return;
+    currentSession = {
+      ...currentSession,
+      profile: { ...profile, messageCount: safeCount },
     };
   },
 };

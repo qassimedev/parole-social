@@ -38,11 +38,25 @@
 // un tiers — pas d'énumération), suppression réservée au blocker,
 // pas de document inverse automatique, requête « mes blocages »
 // bornée sur blockerId.
+// Phase 9 : bloc P (Messagerie privée, Lot 3) — collection
+// conversations/{id déterministe trié} (participants string[2]
+// distincts triés, ID canonique imposé, document immuable côté
+// client, lecture participant non banni OU modérateur/admin, créa
+// tion canAct + participant + hasOnly strict, pas d'énumération) et
+// collection messages/{id} (création canAct + conversation existante
+// + participation + AUCUN blocage dans aucune direction (effet
+// bidirectionnel) + contenu 1..2000 + read/readAt/moderationStatus
+// verrouillés + hasOnly strict ; lecture participant non banni OU
+// modérateur/admin ; historique lisible même avec un blocage ; mise
+// à jour UNIQUEMENT read false->true + readAt par le DESTINATAIRE
+// non banni, déjà-lu immuable, modérateur sans passe-droit, aucune
+// suppression ni édition ; messageCount verrouillé à la création du
+// profil).
 // ============================================================
 
 import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
-import { setDoc, doc, getDoc, updateDoc, deleteDoc, getDocs, query, where, collection } from 'firebase/firestore';
+import { setDoc, doc, getDoc, updateDoc, deleteDoc, getDocs, query, where, orderBy, collection } from 'firebase/firestore';
 import { ref, uploadBytes, getBytes, deleteObject } from 'firebase/storage';
 
 const projectId = 'parole-social';
@@ -104,6 +118,7 @@ function user(uid, role = 'user', extra = {}) {
     followerCount: 0,
     followingCount: 0,
     notificationCount: 0,
+    messageCount: 0,
     ...extra,
   };
 }
@@ -198,6 +213,36 @@ function blockDoc(blockerId, blockedId) {
   return { blockerId, blockedId, createdAt: T.createdAt };
 }
 
+// Conversation au schéma complet (Phase 9 - Lot 3). `participants`
+// sont TRIÉS (ID canonique = [a, b].sort().join('_')). À la
+// création, derniers champs vides — actualisés uniquement par les
+// Cloud Functions.
+function conversationDoc(a, b, extra = {}) {
+  return {
+    participants: [a, b].sort(),
+    createdAt: T.createdAt,
+    lastMessageAt: null,
+    lastMessagePreview: '',
+    lastSenderId: '',
+    ...extra,
+  };
+}
+
+// Message au schéma complet (read=false, readAt=null,
+// moderationStatus='visible' à la création).
+function messageDoc(conversationId, senderId, content, extra = {}) {
+  return {
+    conversationId,
+    senderId,
+    content,
+    read: false,
+    readAt: null,
+    moderationStatus: 'visible',
+    createdAt: T.createdAt,
+    ...extra,
+  };
+}
+
 async function seed() {
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
@@ -259,6 +304,31 @@ async function seed() {
     // inverse bob_alice n'existe PAS et ne doit jamais être créé
     // automatiquement.
     await setDoc(doc(db, 'blocks', 'alice_bob'), blockDoc('alice', 'bob'));
+
+    // Messagerie (Phase 9 - Lot 3) : utilisateur banni, conversations
+    // et messages de base. La conversation alice_bob Lie une paire
+    // où alice BLOQUE bob (créée ci-dessus) : l'envoi de messages y
+    // est refusé dans les DEUX directions, mais l'historique reste
+    // lisible par les participants non bannis.
+    await setDoc(doc(db, 'users', 'bannedP'), user('bannedP', 'user', { banned: true }));
+    await setDoc(doc(db, 'conversations', 'alice_bob'), conversationDoc('alice', 'bob', {
+      lastMessageAt: T.createdAt,
+      lastMessagePreview: 'Salut !',
+      lastSenderId: 'bob',
+    }));
+    await setDoc(doc(db, 'conversations', 'alice_eve'), conversationDoc('alice', 'eve'));
+    await setDoc(doc(db, 'conversations', 'alice_zoe'), conversationDoc('alice', 'zoe'));
+    await setDoc(doc(db, 'conversations', 'alice_ghost'), conversationDoc('alice', 'ghostP'));
+    await setDoc(doc(db, 'conversations', 'alice_bannedP'), conversationDoc('alice', 'bannedP'));
+    await setDoc(doc(db, 'messages', 'm1'), messageDoc('alice_bob', 'alice', 'Bonjour', {
+      read: true,
+      readAt: T.createdAt,
+    }));
+    await setDoc(doc(db, 'messages', 'm2'), messageDoc('alice_bob', 'bob', 'Hello Alice'));
+    await setDoc(doc(db, 'messages', 'm3'), messageDoc('alice_bob', 'alice', 'Deuxieme message'));
+    await setDoc(doc(db, 'messages', 'm4'), messageDoc('alice_eve', 'eve', 'Salut quantique'));
+    await setDoc(doc(db, 'messages', 'm_banned'), messageDoc('alice_bannedP', 'bannedP', 'Essai banni'));
+    await setDoc(doc(db, 'messages', 'm_orphan'), messageDoc('no_conv', 'alice', 'Orphelin'));
   });
 }
 
@@ -1380,6 +1450,234 @@ test('O25 Aucun document inverse automatique (bob_alice inexistant)', async () =
       throw new Error('Le document inverse bob_alice ne devrait pas exister.');
     }
   });
+});
+
+// ============================================================
+// Phase 9 - Lot 3 : Messagerie privée 1-à-1 (conversations)
+// ============================================================
+test('P01 Création d’une conversation par un participant OK (ID canonique trié)', async () => {
+  await expectAllowed(setDoc(doc(charlie().firestore(), 'conversations', 'charlie_dave'), conversationDoc('charlie', 'dave')));
+});
+test('P02 ID du doc ≠ participants triés REFUS (déterminisme)', async () => {
+  // Doc id non canonique : participants ['charlie','dave'] exigent
+  // l'id 'charlie_dave', pas 'dave_charlie'.
+  await expectDenied(setDoc(doc(charlie().firestore(), 'conversations', 'dave_charlie'), conversationDoc('charlie', 'dave')));
+  // Doc id canonique mais participants stockés DANS LE DÉSORDRE.
+  await expectDenied(setDoc(doc(charlie().firestore(), 'conversations', 'charlie_dave'),
+    { ...conversationDoc('charlie', 'dave'), participants: ['dave', 'charlie'] }));
+});
+test('P03 Plus de 2 participants REFUS', async () => {
+  await expectDenied(setDoc(doc(charlie().firestore(), 'conversations', 'charlie_dave2'),
+    { ...conversationDoc('charlie', 'dave'), participants: ['charlie', 'dave', 'eve'] }));
+});
+test('P04 Conversation avec soi-même REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'conversations', 'eve_eve'), conversationDoc('eve', 'eve')));
+});
+test('P05 Création par un NON-participant REFUS', async () => {
+  await expectDenied(setDoc(doc(charlie().firestore(), 'conversations', 'bob_eve'), conversationDoc('bob', 'eve')));
+});
+test('P06 Champ parasite à la création REFUS (hasOnly)', async () => {
+  await expectDenied(setDoc(doc(dave().firestore(), 'conversations', 'dave_charlie2'),
+    { ...conversationDoc('dave', 'charlie'), hacked: 1 }));
+});
+test('P07 Champ obligatoire manquant (participants) REFUS', async () => {
+  await expectDenied(setDoc(doc(charlie().firestore(), 'conversations', 'charlie_dave3'),
+    { createdAt: T.createdAt, lastMessageAt: null, lastMessagePreview: '', lastSenderId: '' }));
+});
+test('P08 Types incorrects REFUS', async () => {
+  // participants mélangés [string, nombre] : taille 2 mais types faux.
+  await expectDenied(setDoc(doc(charlie().firestore(), 'conversations', 'charlie_dave4'),
+    { ...conversationDoc('charlie', 'dave'), participants: ['charlie', 42] }));
+});
+test('P09 Utilisateur banni ne peut pas créer une conversation REFUS', async () => {
+  const bannedP = () => testEnv.authenticatedContext('bannedP');
+  await expectDenied(setDoc(doc(bannedP().firestore(), 'conversations', 'charlie_bannedP'), conversationDoc('charlie', 'bannedP')));
+});
+test('P10 Double création du même ID REFUS (double setDoc = update)', async () => {
+  await expectDenied(setDoc(doc(charlie().firestore(), 'conversations', 'charlie_dave'), conversationDoc('charlie', 'dave')));
+});
+test('P11 Lecture par un participant OK (même avec un blocage en place)', async () => {
+  // bob est bloqué par alice (seed alice_bob) : l'HISTORIQUE reste lisible.
+  await expectAllowed(getDoc(doc(alice().firestore(), 'conversations', 'alice_bob')));
+  await expectAllowed(getDoc(doc(bob().firestore(), 'conversations', 'alice_bob')));
+});
+test('P12 Lecture par un tiers REFUS', async () => {
+  await expectDenied(getDoc(doc(charlie().firestore(), 'conversations', 'alice_bob')));
+});
+test('P13 Lecture par modérateur et admin OK', async () => {
+  await expectAllowed(getDoc(doc(mod().firestore(), 'conversations', 'alice_bob')));
+  await expectAllowed(getDoc(doc(admin().firestore(), 'conversations', 'alice_bob')));
+});
+test('P14 Lecture par un utilisateur banni REFUS', async () => {
+  const bannedP = () => testEnv.authenticatedContext('bannedP');
+  await expectDenied(getDoc(doc(bannedP().firestore(), 'conversations', 'alice_bannedP')));
+});
+test('P15 Modification par un participant REFUS (immuable côté client)', async () => {
+  await expectDenied(updateDoc(doc(alice().firestore(), 'conversations', 'alice_bob'), { lastMessagePreview: 'hacké' }));
+});
+test('P16 Suppression par un participant REFUS', async () => {
+  await expectDenied(deleteDoc(doc(alice().firestore(), 'conversations', 'alice_bob')));
+});
+test('P17 Un tiers ne peut pas énumérer toutes les conversations REFUS', async () => {
+  await expectDenied(getDocs(collection(charlie().firestore(), 'conversations')));
+});
+test('P18 Requête « mes conversations » (array-contains moi) OK et sans fuite', async () => {
+  const snap = await getDocs(query(
+    collection(alice().firestore(), 'conversations'),
+    where('participants', 'array-contains', 'alice'),
+    orderBy('lastMessageAt', 'desc'),
+  ));
+  const ids = snap.docs.map((d) => d.id);
+  if (!ids.includes('alice_bob') || !ids.includes('alice_eve') || !ids.includes('alice_zoe')) {
+    throw new Error(`La requête devrait contenir les conversations d'alice : ${ids.join(', ')}`);
+  }
+  if (ids.includes('charlie_dave')) {
+    throw new Error(`Fuite d'une conversation d'autrui dans « mes conversations » : ${ids.join(', ')}`);
+  }
+  const leaked = snap.docs.filter((d) => !d.data().participants.includes('alice'));
+  if (leaked.length > 0) {
+    throw new Error(`Conversation sans alice dans « mes conversations » : ${leaked.map((d) => d.id).join(', ')}`);
+  }
+});
+
+// ============================================================
+// Phase 9 - Lot 3 : Messagerie privée 1-à-1 (messages)
+// ============================================================
+test('M01 Envoi d’un message dans une conversation existante OK (aucun blocage)', async () => {
+  await expectAllowed(setDoc(doc(eve().firestore(), 'messages', 'm_eve1'), messageDoc('alice_eve', 'eve', 'Re bonjour')));
+});
+test('M02 Envoi par un NON-participant REFUS', async () => {
+  await expectDenied(setDoc(doc(charlie().firestore(), 'messages', 'm_charlie1'), messageDoc('alice_bob', 'charlie', 'Intrusion')));
+});
+test('M03 Envoi bloqué dans la direction « je bloque » REFUS', async () => {
+  await expectDenied(setDoc(doc(alice().firestore(), 'messages', 'm_bl_1'), messageDoc('alice_bob', 'alice', 'Coucou')));
+});
+test('M04 Envoi bloqué dans la direction « il me bloque » REFUS (effet bidirectionnel)', async () => {
+  await expectDenied(setDoc(doc(bob().firestore(), 'messages', 'm_bl_2'), messageDoc('alice_bob', 'bob', 'Réponse impossible')));
+});
+test('M05 Envoi vers une conversation inexistante REFUS', async () => {
+  await expectDenied(setDoc(doc(dave().firestore(), 'messages', 'm_ghost'), messageDoc('no_conv_send', 'dave', 'Vers le néant')));
+});
+test('M06 senderId ≠ auth.uid REFUS (usurpation)', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'messages', 'm_usurp'), messageDoc('alice_eve', 'alice', 'Faux alice')));
+});
+test('M07 Contenu vide REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'messages', 'm_empty'), messageDoc('alice_eve', 'eve', '')));
+});
+test('M08 Contenu > 2000 caractères REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'messages', 'm_long'), messageDoc('alice_eve', 'eve', 'x'.repeat(2001))));
+});
+test('M09 read=true à la création REFUS (lu au dépôt interdit)', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'messages', 'm_read'), messageDoc('alice_eve', 'eve', 'Déjà lu', { read: true })));
+});
+test('M10 readAt non null à la création REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'messages', 'm_readat'), messageDoc('alice_eve', 'eve', 'Daté', { readAt: T.createdAt })));
+});
+test('M11 moderationStatus ≠ visible à la création REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'messages', 'm_mod'), messageDoc('alice_eve', 'eve', 'Masqué', { moderationStatus: 'hidden' })));
+});
+test('M12 Champ parasite à la création REFUS (hasOnly)', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'messages', 'm_hack'), { ...messageDoc('alice_eve', 'eve', 'Bien'), hacked: 1 }));
+});
+test('M13 conversationId manquant REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'messages', 'm_noconv'),
+    { senderId: 'eve', content: 'Sans conversation', read: false, readAt: null, moderationStatus: 'visible', createdAt: T.createdAt }));
+});
+test('M14 content non-string REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'messages', 'm_num'), { ...messageDoc('alice_eve', 'eve', 'ok'), content: 42 }));
+});
+test('M15 Utilisateur banni ne peut pas envoyer REFUS', async () => {
+  const bannedP = () => testEnv.authenticatedContext('bannedP');
+  await expectDenied(setDoc(doc(bannedP().firestore(), 'messages', 'm_ban_send'), messageDoc('alice_bannedP', 'bannedP', 'Banni')));
+});
+test('M16 Utilisateur sans profil ne peut pas envoyer REFUS', async () => {
+  // ghostP est participant de alice_ghost (seed) mais n'a AUCUN profil.
+  const ghostP = () => testEnv.authenticatedContext('ghostP');
+  await expectDenied(setDoc(doc(ghostP().firestore(), 'messages', 'm_ghostsend'), messageDoc('alice_ghost', 'ghostP', 'Sans profil')));
+});
+test('M17 Lecture par un participant OK', async () => {
+  await expectAllowed(getDoc(doc(alice().firestore(), 'messages', 'm2')));
+});
+test('M18 Lecture de l’historique malgré un blocage OK', async () => {
+  // bob EST le destinataire ET alice le bloque : l'historique reste lisible.
+  await expectAllowed(getDoc(doc(bob().firestore(), 'messages', 'm1')));
+});
+test('M19 Lecture par un tiers REFUS', async () => {
+  await expectDenied(getDoc(doc(charlie().firestore(), 'messages', 'm1')));
+});
+test('M20 Lecture par un modérateur OK', async () => {
+  await expectAllowed(getDoc(doc(mod().firestore(), 'messages', 'm1')));
+});
+test('M21 Lecture par un utilisateur banni REFUS', async () => {
+  const bannedP = () => testEnv.authenticatedContext('bannedP');
+  await expectDenied(getDoc(doc(bannedP().firestore(), 'messages', 'm_banned')));
+});
+test('M22 Lecture d’un message d’une conversation inexistante REFUS', async () => {
+  await expectDenied(getDoc(doc(alice().firestore(), 'messages', 'm_orphan')));
+});
+test('M23 Un participant ne peut pas énumérer tous les messages REFUS', async () => {
+  await expectDenied(getDocs(collection(alice().firestore(), 'messages')));
+});
+test('M24 Requête bornée sur conversationId OK (ordre createdAt croissant, aucun message étranger)', async () => {
+  const snap = await getDocs(query(
+    collection(alice().firestore(), 'messages'),
+    where('conversationId', '==', 'alice_bob'),
+    orderBy('createdAt', 'asc'),
+  ));
+  const ids = snap.docs.map((d) => d.id).sort();
+  if (ids.join(',') !== ['m1', 'm2', 'm3'].join(',')) {
+    throw new Error(`Requête messages alice_bob inattendue : ${ids.join(', ')}`);
+  }
+  const leaked = snap.docs.filter((d) => d.data().conversationId !== 'alice_bob');
+  if (leaked.length > 0) {
+    throw new Error(`Message hors conversation dans la requête : ${leaked.map((d) => d.id).join(', ')}`);
+  }
+});
+test('M25 Le DESTINATAIRE marque un message comme lu OK', async () => {
+  // m2 : envoyé par bob → destinaire alice. Seule alice peut le marquer lu.
+  await expectAllowed(updateDoc(doc(alice().firestore(), 'messages', 'm2'), { read: true, readAt: T.createdAt }));
+});
+test('M26 L’AUTEUR ne peut pas marquer son propre message comme lu REFUS', async () => {
+  // bob est l'auteur de m2 : il ne peut pas se marquer lu à lui-même.
+  await expectDenied(updateDoc(doc(bob().firestore(), 'messages', 'm2'), { read: true, readAt: T.createdAt }));
+});
+test('M27 read true→false REFUS (double sens de lecture interdit)', async () => {
+  await expectDenied(updateDoc(doc(alice().firestore(), 'messages', 'm2'), { read: false }));
+});
+test('M28 Déjà-lu immuable REFUS (aucune ré-écriture)', async () => {
+  // m1 a déjà read=true : toute nouvelle écriture (même read:true) est refusée.
+  await expectDenied(updateDoc(doc(bob().firestore(), 'messages', 'm1'), { read: true, readAt: T.createdAt }));
+});
+test('M29 Un tiers ne peut pas marquer comme lu REFUS', async () => {
+  await expectDenied(updateDoc(doc(charlie().firestore(), 'messages', 'm3'), { read: true, readAt: T.createdAt }));
+});
+test('M30 Un modérateur ne peut pas contourner la règle de lecture REFUS', async () => {
+  await expectDenied(updateDoc(doc(mod().firestore(), 'messages', 'm3'), { read: true, readAt: T.createdAt }));
+});
+test('M31 Un utilisateur banni ne peut pas marquer comme lu REFUS', async () => {
+  const bannedP = () => testEnv.authenticatedContext('bannedP');
+  await expectDenied(updateDoc(doc(bannedP().firestore(), 'messages', 'm_banned'), { read: true, readAt: T.createdAt }));
+});
+test('M32 Édition du contenu REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'messages', 'm4'), { content: 'Corrigé' }));
+});
+test('M33 Suppression d’un message REFUS (immuable)', async () => {
+  await expectDenied(deleteDoc(doc(eve().firestore(), 'messages', 'm4')));
+  await expectDenied(deleteDoc(doc(alice().firestore(), 'messages', 'm2')));
+});
+
+// ============================================================
+// Phase 9 - Lot 3 : Messagerie (messageCount du profil)
+// ============================================================
+test('U01 messageCount doit être 0 à la création du profil (absent ou pair REFUS)', async () => {
+  // users.create exige messageCount == 0 (et le champ dans hasOnly).
+  const ctx = () => testEnv.authenticatedContext('zoeNew');
+  await expectDenied(setDoc(doc(ctx().firestore(), 'users', 'zoeNew'), { ...user('zoeNew'), messageCount: 1 }));
+  const { messageCount: _unused, ...withoutCount } = user('zoeNew');
+  await expectDenied(setDoc(doc(ctx().firestore(), 'users', 'zoeNew'), withoutCount));
+});
+test('U02 L’utilisateur ne peut pas modifier messageCount REFUS (épinglé)', async () => {
+  await expectDenied(updateDoc(doc(alice().firestore(), 'users', 'alice'), { messageCount: 3 }));
 });
 
 // ============================================================

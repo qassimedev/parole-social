@@ -267,7 +267,7 @@ export function renderModeration(ctx: ViewContext): string {
       </form>
     </section>
   `;
-  return appShell(inner, 'moderation', true, session.profile?.notificationCount ?? 0);
+  return appShell(inner, 'moderation', true, session.profile?.notificationCount ?? 0, session.profile?.messageCount ?? 0);
 }
 
 export function mountModeration(root: HTMLElement, ctx: ViewContext): void {

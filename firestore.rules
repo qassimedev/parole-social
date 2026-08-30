@@ -56,6 +56,72 @@ service cloud.firestore {
       return isSignedIn() && userDocExists(request.auth.uid) && !isBanned(request.auth.uid);
     }
 
+    // ----------------------------------------------------------
+    // Messagerie (Phase 9 — Lot 3)
+    // Une conversation a un ID DÉTERMINISTE : les participants
+    // (deux, distincts) triés en ordre croissant, séparés par '_'.
+    // Une seule conversation par paire : un second setDoc sur le
+    // même ID devient un UPDATE -> refusé (document immuable côté
+    // client ; seules les Cloud Functions actualisent lastMessage*).
+    // ----------------------------------------------------------
+    function canonicalConversationId(p0, p1) {
+      return (p0 <= p1) ? (p0 + '_' + p1) : (p1 + '_' + p0);
+    }
+
+    function conversationExists(conversationId) {
+      return exists(/databases/$(database)/documents/conversations/$(conversationId));
+    }
+
+    function getConversationData(conversationId) {
+      return get(/databases/$(database)/documents/conversations/$(conversationId)).data;
+    }
+
+    // `uid` est-il l'un des deux participants (doc bien formé) ?
+    // La forme `uid in participants` est OBLIGATOIRE pour rester
+    // compatible avec les requêtes `participants array-contains`
+    // (l'évaluateur ne sait pas prouver les opérateurs `is list` /
+    // taille sur le champ filtré). Un doc mal formé (participants
+    // non-liste) provoque une erreur d'évaluation -> refus.
+    function isConversationParticipant(uid, convData) {
+      return uid in convData.participants;
+    }
+
+    // L'autre participant d'une conversation (par rapport à `uid`).
+    function otherConversationParticipant(uid, convData) {
+      return convData.participants[0] == uid
+        ? convData.participants[1]
+        : convData.participants[0];
+    }
+
+    // Lecture d'une conversation / d'un message : participant NON
+    // banni OU modérateur/admin. Un banni ne peut ni lire ni
+    // marquer comme lu ; un modérateur/admin peut lire (prérequis
+    // de modération) mais ne peut PAS écrire dans une conversation.
+    function canReadConversation(uid, conversationId) {
+      return isModerator()
+        || (isSignedIn()
+            && !isBanned(uid)
+            && conversationExists(conversationId)
+            && isConversationParticipant(uid, getConversationData(conversationId)));
+    }
+
+    // Envoi d'un message : canAct() + conversation existante +
+    // participation + aucun blocage dans AUCUNE direction.
+    // `exists()` sur les deux directions (`alice_bob` ou
+    // `bob_alice`) rend le blocage BIDIRECTIONNEL : impossible
+    // d'écrire à qui vous a bloqué, impossible d'écrire à un
+    // utilisateur que vous avez bloqué.
+    function canSendMessage(uid, conversationId) {
+      return canAct()
+        && conversationExists(conversationId)
+        && isConversationParticipant(uid, getConversationData(conversationId));
+    }
+
+    function notBlockedBetween(uid, conversationId) {
+      return !exists(/databases/$(database)/documents/blocks/$(uid + '_' + otherConversationParticipant(uid, getConversationData(conversationId))))
+        && !exists(/databases/$(database)/documents/blocks/$(otherConversationParticipant(uid, getConversationData(conversationId)) + '_' + uid));
+    }
+
     // L'utilisateur suit-il l'auteur ? (collection `follows`,
     // prévue pour une phase ultérieure. Par défaut : non.)
     function followsAuthor(authorId) {
@@ -142,13 +208,15 @@ service cloud.firestore {
         && request.resource.data.followerCount == 0
         && request.resource.data.followingCount == 0
         && request.resource.data.notificationCount == 0
+        && request.resource.data.messageCount == 0
         && request.resource.data.createdAt is timestamp
         && request.resource.data.updatedAt is timestamp
         && request.resource.data.keys().hasOnly([
           'uid', 'displayName', 'bio', 'avatarPath', 'createdAt',
           'updatedAt', 'role', 'banned', 'moderationStatus',
           'postCount', 'reportCount', 'likeCount',
-          'followerCount', 'followingCount', 'notificationCount'
+          'followerCount', 'followingCount', 'notificationCount',
+          'messageCount'
         ]);
 
       // Mise à jour par le propriétaire : champs de profil uniquement.
@@ -165,7 +233,8 @@ service cloud.firestore {
         && request.resource.data.likeCount == resource.data.likeCount
         && request.resource.data.followerCount == resource.data.followerCount
         && request.resource.data.followingCount == resource.data.followingCount
-        && request.resource.data.notificationCount == resource.data.notificationCount;
+        && request.resource.data.notificationCount == resource.data.notificationCount
+        && request.resource.data.messageCount == resource.data.messageCount;
 
       // Suppression de profil : jamais via un client.
       allow delete: if false;
@@ -526,14 +595,131 @@ service cloud.firestore {
     }
 
     // ----------------------------------------------------------
+    // conversations/{conversationId} (Phase 9 — Lot 3)
+    // Messagerie privée 1-à-1. ID DÉTERMINISTE : participants triés
+    // séparés par '_' (imposé par la règle de création) -> une seule
+    // conversation par paire, un second setDoc devient un UPDATE ->
+    // refusé. Champs : participants (string[2] triées, distinctes,
+    // contient le créateur), createdAt, lastMessageAt / lastMessage
+    // Preview / lastSenderId (vides à la création, actualisés UNIQUE
+    // MENT par les Cloud Functions onMessageCreated/onMessageUpdated
+    // — le client ne peut donc pas falsifier l'état d'une
+    // conversation). Le document est IMMUABLE côté client (update /
+    // delete refusés, y compris pour un modérateur).
+    // Lecture : participant non banni OU modérateur/admin — jamais le
+    // banni, et les documents hors accès ne sont pas lisibles (pas
+    // d'énumération globale ; la requête « mes conversations » est
+    // bornée par `participants array-contains`).
+    // ----------------------------------------------------------
+    match /conversations/{conversationId} {
+      // Lecture : participant non banni OU modérateur/admin. La règle
+      // s'appuie sur `resource.data` (jamais de get() auto-référent)
+      // : la requête de l'inbox (`participants array-contains` +
+      // orderBy lastMessageAt) reste donc compatible.
+      allow read: if isSignedIn()
+        && (isModerator()
+            || (!isBanned(request.auth.uid)
+                && isConversationParticipant(request.auth.uid, resource.data)));
+
+      allow create: if canAct()
+        && 'participants' in request.resource.data
+        && request.resource.data.participants is list
+        && request.resource.data.participants.size() == 2
+        && request.resource.data.participants[0] is string
+        && request.resource.data.participants[1] is string
+        && request.resource.data.participants[0].size() > 0
+        && request.resource.data.participants[1].size() > 0
+        && request.resource.data.participants[0] != request.resource.data.participants[1]
+        && request.resource.data.participants[0] <= request.resource.data.participants[1]
+        && (request.resource.data.participants[0] == request.auth.uid
+            || request.resource.data.participants[1] == request.auth.uid)
+        && canonicalConversationId(
+             request.resource.data.participants[0],
+             request.resource.data.participants[1]
+           ) == conversationId
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.lastMessageAt == null
+        && request.resource.data.lastMessagePreview == ''
+        && request.resource.data.lastSenderId == ''
+        && request.resource.data.keys().hasOnly([
+          'participants', 'createdAt', 'lastMessageAt',
+          'lastMessagePreview', 'lastSenderId'
+        ]);
+
+      // Le client ne peut JAMAIS modifier une conversation (l'état de
+      // la conversation est actualisé uniquement par les Cloud
+      // Functions onMessageCreated / onMessageUpdated).
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // ----------------------------------------------------------
+    // messages/{messageId} (Phase 9 — Lot 3)
+    // Messages privés 1-à-1 au sein d'une conversation. Création via
+    // addDoc (ID auto) : canAct() (connecté, profil présent, non
+    // banni), senderId == auth.uid, conversation existante + parti
+    // cipation, CONTENU 1..2000 caractères, read == false,
+    // readAt == null, moderationStatus == 'visible', et AUCUN
+    // blocage dans l'une OU l'autre direction (effet bidirectionnel
+    // du blocage — Lot 2). Le contenu ne peut pas être modifié ni
+    // supprimé (document immuable côté client).
+    // Lecture : participant non banni OU modérateur/admin. Un banni
+    // ne lit pas ses messages, même anciens. L'historique reste
+    // lisible après un blocage pour les participants non bannis
+    // (un blocage n'efface pas l'historique).
+    // Mise à jour UNIQUE autorisée : le passage read false -> true
+    // + readAt timestamp, uniquement par le DESTINATAIRE (senderId
+    // != auth.uid), non banni et participant. Un auteur ne peut pas
+    // marquer son propre message comme lu ; un modérateur/admin ne
+    // contourne pas (réserve au destinataire) ; true -> false
+    // refusé ; déjà lu immuable (décrément exactement unitaire du
+    // compteur users.messageCount côté server triggers).
+    // ----------------------------------------------------------
+    match /messages/{messageId} {
+      allow read: if canReadConversation(request.auth.uid, resource.data.conversationId);
+
+      allow create: if canSendMessage(request.auth.uid, request.resource.data.conversationId)
+        && 'conversationId' in request.resource.data
+        && request.resource.data.conversationId is string
+        && request.resource.data.senderId == request.auth.uid
+        && notBlockedBetween(request.auth.uid, request.resource.data.conversationId)
+        && 'content' in request.resource.data
+        && request.resource.data.content is string
+        && request.resource.data.content.size() > 0
+        && request.resource.data.content.size() <= 2000
+        && request.resource.data.read == false
+        && request.resource.data.readAt == null
+        && request.resource.data.moderationStatus == 'visible'
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.keys().hasOnly([
+          'conversationId', 'senderId', 'content', 'read', 'readAt',
+          'moderationStatus', 'createdAt'
+        ]);
+
+      allow update: if isSignedIn()
+        && !isBanned(request.auth.uid)
+        && resource.data.senderId != request.auth.uid
+        && resource.data.read == false
+        && request.resource.data.read == true
+        && request.resource.data.readAt is timestamp
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['read', 'readAt'])
+        && request.resource.data.conversationId == resource.data.conversationId
+        && request.resource.data.senderId == resource.data.senderId
+        && request.resource.data.moderationStatus == resource.data.moderationStatus
+        && request.resource.data.createdAt == resource.data.createdAt
+        && conversationExists(resource.data.conversationId)
+        && isConversationParticipant(request.auth.uid, getConversationData(resource.data.conversationId));
+
+      // Un message n'est jamais supprimé par un client.
+      allow delete: if false;
+    }
+
+    // ----------------------------------------------------------
     // Collections prévues pour les phases suivantes (DENY BY DEFAULT
-    // jusqu'à implémentation) : appeals, messages, hashtags,
-    // creatorStats.
+    // jusqu'à implémentation) : appeals, hashtags, creatorStats.
     // ----------------------------------------------------------
     match /appeals/{docId} {
-      allow read, write: if false;
-    }
-    match /messages/{docId} {
       allow read, write: if false;
     }
     match /hashtags/{docId} {

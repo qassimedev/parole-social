@@ -20,6 +20,8 @@ import { renderModeration, mountModeration } from './moderation';
 import { renderUser, mountUser } from './user';
 import { renderNotifications, mountNotifications } from './notifications';
 import { renderHashtag, mountHashtag } from './hashtag';
+import { renderInbox, mountInbox } from './inbox';
+import { renderConversation, mountConversation } from './conversation';
 
 export function splashView(): string {
   return `
@@ -113,6 +115,14 @@ export function renderView(root: HTMLElement): void {
     case 'notifications':
       root.innerHTML = renderNotifications(ctx);
       mountNotifications(root, ctx);
+      return;
+    case 'messages':
+      root.innerHTML = renderInbox(ctx);
+      mountInbox(root, ctx);
+      return;
+    case 'conversation':
+      root.innerHTML = renderConversation(ctx);
+      mountConversation(root, ctx);
       return;
     case 'moderation':
       // Accès réservé modérateur/admin : l'affichage n'est jamais

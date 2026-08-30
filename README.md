@@ -79,11 +79,28 @@ avec une décision traçable et susceptible d'appel.
   client), auto-blocage interdit, cible existante et non bannie exigée,
   lecture réservée au bloquant (ou modérateur/admin — jamais au bloqué, ni à
   un tiers), déblocage réservé au bloquant, prérequis de sécurité pour la
-  messagerie : l'effet futur sera **bidirectionnel** via `exists()` sur les
-  deux directions (`blocks/alice_bob` **et** `blocks/bob_alice`). Bouton
-  Bloquer / Débloquer sur les profils publics + section « Utilisateurs
-  bloqués » dans les Paramètres. Aucune Cloud Function, aucun index
-  composite ajouté.
+  messagerie : l'effet est désormais **bidirectionnel** (Lot 3) via
+  `exists()` sur les deux directions — `blocks/alice_bob` **ou**
+  `blocks/bob_alice`. Bouton Bloquer / Débloquer sur les profils publics +
+  section « Utilisateurs bloqués » dans les Paramètres. Aucune Cloud Function,
+  aucun index composite ajouté.
+- **Phase 9 — Lot 3** (validée) : messagerie privée 1-à-1 — collection
+  `conversations/{id déterministe}` (participants **triés** `[a, b].sort()`,
+  une seule conversation par paire, document **immuable** côté client,
+  lecture réservée aux participants non bannis ou modérateur/admin, aucune
+  énumération possible) ; collection `messages/{id}` (création `canAct` +
+  participation + **aucun blocage dans aucune direction** + contenu 1..2000 +
+  schéma strict ; lecture participant non banni ou modérateur/admin ;
+  historique lisible même après un blocage ; mise à jour **uniquement**
+  `read false → true` par le **destinataire**, déjà-lu immuable, aucune
+  suppression ni édition). Compteur `users.messageCount` (messages non lus
+  reçus), maintenu exclusivement par `onMessageCreated` (+1 destinataire +
+  notification `message` + actualisation de la conversation) et
+  `onMessageUpdated` (décrément exact et idempotent, borné ≥ 0). Badge
+  Messages dans la navigation, pages `#/messages` (inbox) et
+  `#/messages/{conversationId}`, bouton « Envoyer un message » sur les
+  profils, notification `message` avec lien « Voir la conversation ». Deux
+  index composites ajoutés (`conversations` et `messages`).
 
 ---
 
@@ -112,16 +129,18 @@ avec une décision traçable et susceptible d'appel.
 │ • follows (dédupliqués)     │   │ • onReportCreated (cnt)     │
 │ • shares (dédupliqués)     │   │ • onCommentCreated/Deleted  │
 │ • blocks (dédupliqués)     │   │ • onLikeCreated/Deleted(cnt)│
-│ • moderationQueue           │   │ • onFollowCreated/Deleted   │
-│ • notifications             │   │   (cnt abonnements)         │
-│ • auditLogs                 │   │ • onShareCreated/Deleted    │
-│ Index composites minimaux   │   │   (cnt `posts.shareCount`)  │
-│                             │   │ • onLike/Comment/Follow →   │
-│                             │   │   notification (Phase 5)    │
+│ • conversations (dédupl.)  │   │ • onFollowCreated/Deleted   │
+│ • messages                  │   │   (cnt abonnements)         │
+│ • moderationQueue           │   │ • onShareCreated/Deleted    │
+│ • notifications             │   │   (cnt `posts.shareCount`)  │
+│ • auditLogs                 │   │ • onLike/Comment/Follow →   │
+│ Index composites minimaux   │   │   notification (Phase 5)    │
 │                             │   │ • onShare → notification    │
 │                             │   │   `share` (Phase 6)         │
 │                             │   │ • onNotificationCreated/    │
 │                             │   │   Updated/Deleted (cnt)     │
+│                             │   │ • onMessageCreated/Updated  │
+│                             │   │   (cnt messages, Phase 9)   │
 │                             │   │ Écrit auditLogs (traçable)  │
 └─────────────────────────────┘   └─────────────────────────────┘
         │ accès authentifié
@@ -147,14 +166,14 @@ directement ces données.
 | uid, displayName, bio, avatarPath | string | propriétaire |
 | role (`user`/`moderator`/`admin`) | string | **jamais un client** (Functions) |
 | banned, bannedUntil, moderationStatus | bool/timestamp/string | **jamais un client** (Functions) |
-| postCount, reportCount, likeCount, followerCount, followingCount, notificationCount | number | **jamais un client** (compteurs système) |
+| postCount, reportCount, likeCount, followerCount, followingCount, notificationCount, messageCount | number | **jamais un client** (compteurs système) |
 
 Lecture : tout utilisateur authentifié. Création : son propre profil uniquement
-(rôle forcé à `user`, `notificationCount` forcé à `0`). Mise à jour : champs de
-profil uniquement
+(rôle forcé à `user`, `notificationCount` forcé à `0`, `messageCount` forcé à
+`0`). Mise à jour : champs de profil uniquement
 (`hasOnly(['displayName','bio','avatarPath','updatedAt'])`). Les compteurs —
-dont `notificationCount` — sont épinglés lors des mises à jour client
-(strictement identiques, jamais modifiables par un client).
+dont `notificationCount` et `messageCount` — sont épinglés lors des mises à
+jour client (strictement identiques, jamais modifiables par un client).
 
 ### posts/{postId}
 | Champ | Type | Qui écrit |
@@ -270,11 +289,60 @@ Blocage utilisateur — prérequis de sécurité pour la messagerie.
   mono-champ (`where blockerId == moi`) : **aucun index composite requis**.
 - Déblocage : suppression réservée au bloquer (`isOwner`, aligné
   follow/like/share).
-- **Effet futur (Messagerie, Lot 3)** : les règles `messages` devront vérifier
-  les **deux directions** via `exists()` ——
-  `blocks/alice_bob` **ou** `blocks/bob_alice` — pour interdire Alice↔Bob dès
-  qu'un blocage existe dans l'une ou l'autre direction. `exists()` ne dépend pas
-  du droit de lecture.
+- **Effet messagerie (implémenté au Lot 3)** : les règles `conversations` /
+  `messages` vérifient les **deux directions** via `exists()` — `blocks/alice_bob`
+  **ou** `blocks/bob_alice` — pour interdire Alice↔Bob dès qu'un blocage existe
+  dans l'une ou l'autre direction. `exists()` ne dépend pas du droit de lecture
+  (le bloqué ne lit jamais le document `blocks`). L'historique des messages
+  reste lisible par les participants non bannis après un blocage.
+
+### conversations/{conversationId} (Phase 9 — Lot 3)
+Messagerie privée 1-à-1. **ID déterministe** : `participants` **triés** en ordre
+croissant, séparés par `_` ([a, b].sort().join('_')) — imposé par la règle de
+création, comme pour les likes/blocks/follows. Une seule conversation par paire
+(un second `setDoc` devient un `update`, refusé). Pour Alice + Bob, l'ID
+canonique est `alice_bob` quelle que soit la direction de création.
+- Champs : `participants` (`string[2]` distinctes, triées, contient le
+  créateur), `createdAt`. `lastMessageAt` / `lastMessagePreview` /
+  `lastSenderId` sont **vides à la création** et actualisés **uniquement** par
+  les Cloud Functions `onMessageCreated` / `onMessageUpdated` — le client ne
+  peut pas falsifier l'état d'une conversation.
+- **Immuabilité** : `update` / `delete` toujours refusés (y compris pour un
+  modérateur). Création : `canAct()` (connecté, profil présent, non banni),
+  ID trié imposé, `hasOnly` strict, `participants` contient `auth.uid`.
+- Lecture : **participant non banni** ou modérateur/admin. Un banni ne lit rien,
+  même sa propre conversation. Impossible d'énumérer les conversations d'autrui :
+  la règle s'appuie sur `resource.data.participants` (`in`), donc la requête
+  « mes conversations » est bornée par `participants array-contains`.
+- Index composite requis : `conversations (participants ASC, lastMessageAt
+  DESC)` — inbox.
+
+### messages/{messageId} (Phase 9 — Lot 3)
+Messages privés au sein d'une conversation (création via `addDoc`, ID auto).
+- Création : `canSendMessage` (`canAct()` + conversation **existante** +
+  participation) + `senderId == auth.uid` + **aucun blocage dans l'une OU
+  l'autre direction** (`exists()` sur `blocks/{uid}_{other}` et
+  `blocks/{other}_{uid}` — effet **bidirectionnel**, Lot 2) + contenu `string`
+  **1..2000** caractères + `read == false` + `readAt == null` +
+  `moderationStatus == 'visible'` + `hasOnly` strict.
+- Lecture : participant **non banni** ou modérateur/admin (prérequis de
+  modération). L'historique reste lisible après un blocage pour les
+  participants non bannis. Aucune énumération globale : la requête du fil est
+  bornée sur `conversationId`.
+- **Mise à jour UNIQUE** : le passage `read false → true` + `readAt`
+  (timestamp), uniquement par le **destinataire** (`senderId != auth.uid`), non
+  banni et participant. Un auteur ne peut pas marquer son propre message comme
+  lu ; un modérateur/admin ne contourne pas ; `true → false` refusé ; **déjà-lu
+  immuable** (décrément de `users.messageCount` exactement unitaire et
+  idempotent). Aucune édition de contenu, aucune suppression.
+- Index composite requis : `messages (conversationId ASC, createdAt ASC)` — fil
+  de discussion paginé (ordre chronologique).
+
+`users.messageCount` = nombre de messages **non lus** reçus. Initialisé à `0` à
+la création du profil, maintenu **exclusivement** par `onMessageCreated` (+1
+destinataire) et `onMessageUpdated` (−1 au passage non lue → lue, borné ≥ 0).
+Le **badge Messages** de la navigation (comme le badge Notifications) affiche
+exclusivement cette valeur et disparaît à zéro.
 
 ### reports/{reportId}
 - **Déduplication** : `reportId = ${reporterId}_${targetType}_${targetId}`.
@@ -296,14 +364,15 @@ Blocage utilisateur — prérequis de sécurité pour la messagerie.
   modérateur/admin, écriture Functions uniquement.
 
 ### notifications/{notificationId}
-Notifications de likes, commentaires, abonnements et partages — **créées
-uniquement par les Cloud Functions** (aucune création/suppression client).
+Notifications de likes, commentaires, abonnements, partages et messages —
+**créées uniquement par les Cloud Functions** (aucune création/suppression
+client).
 
 | Champ | Type | Description |
 |---|---|---|
 | recipientId | string | destinataire |
 | actorId | string | auteur de l'action |
-| type | `like` / `comment` / `follow` / `share` | nature de la notification |
+| type | `like` / `comment` / `follow` / `share` / `message` | nature de la notification |
 | postId | string | post concerné, `''` sinon |
 | commentId | string | commentaire concerné, `''` sinon |
 | read | boolean | `false` à la création |
@@ -331,6 +400,10 @@ Types de notifications (jamais pour soi-même) :
 - `comment` : quelqu'un a commenté votre publication → propriétaire du post.
 - `follow` : quelqu'un vous suit → utilisateur suivi.
 - `share` : quelqu'un a partagé votre publication → propriétaire du post.
+- `message` : quelqu'un vous a envoyé un message privé → destinataire du
+  message (jamais l'expéditeur ; la notification est créée par
+  `onMessageCreated` et ouvre la conversation via un lien « Voir la
+  conversation »).
 - `reply` : quelqu'un a répondu à votre commentaire → auteur du commentaire parent
   (jamais pour un self-reply, et pas de doublon si l'auteur du parent est déjà
   le propriétaire du post notifié par la notification `comment`).
@@ -347,9 +420,11 @@ Journal append-only des actions administratives et de modération.
 - Lecture : **administrateurs uniquement**.
 
 ### Collections prévues pour les phases suivantes
-`appeals`, `messages`, `creatorStats` sont déclarées en **deny-by-default**
-(aucun accès) jusqu'à leur implémentation. La collection `hashtags` n'est **pas
-utilisée** : les hashtags vivent dans le champ optionnel `posts.hashtags`
+`appeals` et `creatorStats` sont déclarées en **deny-by-default** (aucun accès)
+jusqu'à leur implémentation. (`conversations` et `messages` étaient dans cette
+liste avant le Lot 3 : leurs `match` deny-by-default ont été remplacés par de
+vraies règles à la livraison de la messagerie.) La collection `hashtags` n'est
+**pas utilisée** : les hashtags vivent dans le champ optionnel `posts.hashtags`
 (Phase 9 — Lot 1) ; son `match` deny-by-default reste néanmoins en place.
 
 ## Rôles et permissions
@@ -361,6 +436,7 @@ utilisée** : les hashtags vivent dans le champ optionnel `posts.hashtags`
 | Partager / retirer son partage (Phase 6) | ✔ | ✔ | ✔ |
 | Suivre / ne plus suivre un utilisateur | ✔ | ✔ | ✔ |
 | Bloquer / débloquer un utilisateur (Phase 9 — Lot 2) | ✔ | ✔ | ✔ |
+| Envoyer / lire des messages privés 1-à-1 (Phase 9 — Lot 3) | ✔ | ✔ | ✔ (lisent tout) |
 | Lire / marquer ses notifications | ✔ | ✔ | ✔ (admin : lit toutes) |
 | Modifier/supprimer ses propres contenus | ✔ | ✔ | ✔ |
 | Lire les posts publics | ✔ | ✔ | ✔ |
@@ -388,7 +464,7 @@ modération, les compteurs système, les décisions de modération, les
 - Lecture des médias de posts conditionnée à la visibilité du post Firestore
   (`firestore.get` / `firestore.exists`) : un post masqué = médias illisibles.
 
-## Cloud Functions (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6)
+## Cloud Functions (Phase 1 + ... + Phase 9 — Lot 3)
 
 | Fonction | Type | Rôle requis | Effet |
 |---|---|---|---|
@@ -409,6 +485,8 @@ modération, les compteurs système, les décisions de modération, les
 | `onNotificationCreated` (Phase 5) | trigger | — | incrémente `users.notificationCount` (+1) pour une notification non lue |
 | `onNotificationUpdated` (Phase 5) | trigger | — | décrémente `users.notificationCount` (−1) au passage **exact** non lue → lue (idempotent, borné à ≥ 0) |
 | `onNotificationDeleted` (Phase 5) | trigger | — | décrément défensif (−1) si une notification **non lue** est supprimée (borné à ≥ 0) |
+| `onMessageCreated` (Phase 9 — Lot 3) | trigger | — | actualise la conversation (`lastMessageAt` / `lastMessagePreview` normalisée puis tronquée à 80 / `lastSenderId`), incrémente `users.messageCount` du **destinataire** (+1), crée une notification `message` au destinataire (jamais l'expéditeur) |
+| `onMessageUpdated` (Phase 9 — Lot 3) | trigger | — | décrémente `users.messageCount` (−1) au passage **exact** non lue → lue par le destinataire (idempotent : un message déjà lu ne redécrémente jamais, borné à ≥ 0) |
 | `healthcheck` | HTTP | — | état du service |
 
 Les notifications listent **uniquement** les champs du schéma (schema strict) :
@@ -427,6 +505,8 @@ Index composites minimaux (Phase 1), uniquement ceux réellement utilisés :
 | `moderationQueue` | `status` ASC, `createdAt` DESC | file de modération par état (Phase 2/UI) |
 | `notifications` | `recipientId` ASC, `createdAt` DESC | page `#/notifications` : notifications du user, plus récentes d'abord (Phase 5) |
 | `comments` | `postId` ASC, `moderationStatus` ASC, `createdAt` ASC | `fetchComments` : commentaires visibles d'un post, tri chronologique (visibilité des commentaires modérés) |
+| `conversations` (Phase 9 — Lot 3) | `participants` ASC, `lastMessageAt` DESC | inbox « mes conversations » (array-contains + tri par dernière activité) |
+| `messages` (Phase 9 — Lot 3) | `conversationId` ASC, `createdAt` ASC | fil de discussion d'une conversation (égalité + ordre chronologique) |
 
 La collection `shares` (Phase 6) n'ajoute **aucun index composite** : ses
 requêtes (« mes partages ») sont des `where userId` mono-champ.
@@ -448,6 +528,13 @@ le fil *Général*, étendue au tag). Aucun autre index n'est ajouté pour ce lo
 La Phase 9 — Lot 2 (blocage utilisateur) n'ajoute **aucun** index composite :
 la seule requête client sur `blocks` est « mes blocages » (`where blockerId ==
 moi`), mono-champ — couverte par l'index automatique des champs uniques.
+
+La Phase 9 — Lot 3 (messagerie privée) ajoute **deux** index composites,
+réellement requis :
+- `conversations (participants ASC, lastMessageAt DESC)` — inbox « mes
+  conversations » (`participants array-contains` + tri par dernière activité) ;
+- `messages (conversationId ASC, createdAt ASC)` — fil de discussion d'une
+  conversation (égalité `conversationId` + ordre chronologique).
 
 Le correctif « visibilité des commentaires modérés » ajoute l'index composite
 `comments (postId ASC, moderationStatus ASC, createdAt ASC)`, réellement requis
@@ -476,8 +563,8 @@ Ouvrir l'UI des émulateurs : http://localhost:4000
 npm run typecheck      # vérification TypeScript (frontend)
 npm run build          # build frontend
 npm run build:functions
-npm run test:rules     # tests de sécurité Firestore + Storage (245 tests, émulateurs)
-npm run test:functions # tests des Cloud Functions (41 tests, émulateurs)
+npm run test:rules     # tests de sécurité Firestore + Storage (298 tests, émulateurs)
+npm run test:functions # tests des Cloud Functions (46 tests, émulateurs)
 npm run test:all       # tout
 ```
 

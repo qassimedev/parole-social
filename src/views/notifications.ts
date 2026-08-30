@@ -14,6 +14,7 @@ import { describeError } from '../lib/errors';
 import { notify } from '../lib/notify';
 import { store } from '../lib/store';
 import { fetchAuthorNames } from '../lib/comments';
+import { buildConversationId } from '../lib/messages';
 import {
   fetchNotifications,
   markAllNotificationsRead,
@@ -41,6 +42,8 @@ function notificationText(notification: AppNotification, actorName: string): str
       return `${actorName} a partagé votre publication.`;
     case 'reply':
       return `${actorName} a répondu à votre commentaire.`;
+    case 'message':
+      return `${actorName} vous a envoyé un message.`;
   }
 }
 
@@ -66,6 +69,9 @@ function notificationItemMarkup(notification: AppNotification, actorName: string
         <span class="notification-item__date muted">${escapeHtml(date)}</span>
       </div>
       <p class="notification-item__text">${escapeHtml(notificationText(notification, actorName))}</p>
+      ${notification.type === 'message'
+        ? `<div class="notification-item__link"><a href="#/messages/${escapeHtml(buildConversationId(notification.recipientId, notification.actorId))}?peer=${escapeHtml(notification.actorId)}">Voir la conversation</a></div>`
+        : ''}
       <div class="notification-item__actions">${actionsMarkup}</div>
     </article>
   `;
@@ -90,7 +96,7 @@ export function renderNotifications(ctx: ViewContext): string {
       </div>
     </section>
   `;
-  return appShell(inner, 'notifications', isModeratorRole(session.profile?.role), count);
+  return appShell(inner, 'notifications', isModeratorRole(session.profile?.role), count, session.profile?.messageCount ?? 0);
 }
 
 export function mountNotifications(root: HTMLElement, ctx: ViewContext): void {
@@ -150,7 +156,7 @@ export function mountNotifications(root: HTMLElement, ctx: ViewContext): void {
 
   const emptyMarkup = (): string => `
     <div class="notifications__empty muted">
-      Aucune notification pour le moment. Vos likes, commentaires, réponses et abonnements arrivent ici.
+      Aucune notification pour le moment. Vos likes, commentaires, réponses, abonnements et messages arrivent ici.
     </div>
   `;
 
