@@ -18,6 +18,7 @@ import { getAvatarUrl } from '../lib/profile';
 import { fetchPostsByAuthor, linkifyHashtags, type Post } from '../lib/posts';
 import { isFollowing, toggleFollow } from '../lib/follows';
 import { blockUser, isUserBlocked, unblockUser } from '../lib/blocks';
+import { fetchCreatorStats, type CreatorStats } from '../lib/creatorStats';
 import { buildConversationId } from '../lib/messages';
 import type { UserProfile } from '../lib/store';
 import {
@@ -77,6 +78,24 @@ function postsMarkup(posts: Post[]): string {
     return `<div class="muted">Aucune publication visible pour le moment.</div>`;
   }
   return posts.map(postMarkup).join('\n');
+}
+
+// Bloc « Statistiques d'audience » (Lot 6) : alimenté EXCLUSIVEMENT par
+// `creatorStats/{userId}` (lecture seule, compteurs maintenus côté
+// serveur par les Cloud Functions). Le postCount est exclu par le lot.
+function statsMarkup(stats: CreatorStats): string {
+  const entry = (label: string, value: number): string =>
+    `<div class="stat"><span class="stat__value">${Number(value) || 0}</span><span class="stat__label">${escapeHtml(label)}</span></div>`;
+  return `
+    <h3 class="card__title card__title--sm">Statistiques d'audience</h3>
+    <div class="stats">
+      ${entry('J\'aime', stats.likeCount)}
+      ${entry('Abonnés', stats.followerCount)}
+      ${entry('Abonnements', stats.followingCount)}
+      ${entry('Commentaires', stats.commentCount)}
+      ${entry('Partages', stats.shareCount)}
+    </div>
+  `;
 }
 
 export function renderUser(ctx: ViewContext): string {
@@ -148,6 +167,8 @@ export function mountUser(root: HTMLElement, ctx: ViewContext): void {
       const isSelf = profile.uid === uid;
       const followState = isSelf ? false : await isFollowing(uid, profile.uid);
       const blockedState = isSelf ? false : await isUserBlocked(uid, profile.uid);
+      // Lot 6 : statistiques d'audience publiques (lecture seule).
+      const stats = await fetchCreatorStats(profile.uid);
 
       let avatarUrl: string | null = null;
       if (profile.avatarPath) {
@@ -215,6 +236,7 @@ export function mountUser(root: HTMLElement, ctx: ViewContext): void {
           <dt>Abonnements</dt><dd id="user-following-count">${Number(profile.followingCount) || 0}</dd>
           <dt>Abonnés</dt><dd id="user-follower-count">${Number(profile.followerCount) || 0}</dd>
         </dl>
+        ${statsMarkup(stats)}
         <div class="actions">${followButton}${blockButton}${messageButton}</div>
         <h3 class="card__title card__title--sm">Publications récentes</h3>
         <div class="post-feed" id="user-posts">

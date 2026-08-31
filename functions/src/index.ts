@@ -1397,6 +1397,209 @@ export const reviewAppeal = onCall(
 );
 
 // ------------------------------------------------------------
+// Statistiques d'audience publiques (Phase 9 — Lot 6) : creatorStats
+// Collection `creatorStats/{userId}` — vue de PRÉSENTATION des
+// statistiques d'audience d'un utilisateur, exposée publiquement aux
+// utilisateurs connectés. Les CINQ compteurs (likeCount,
+// followerCount, followingCount, commentCount, shareCount) sont des
+// compteurs numériques SYSTÈME : le client ne peut JAMAIS les
+// écrire/modifier/supprimer (règles Firestore : read isSignedIn(),
+// écritures refusées). Un seul déclencheur par type d'événement réel
+// (likes, follows, comments, shares) et dans chaque direction
+// (created/deleted) maintient le document.
+//
+// SOURCE de chaque compteur (événements réels du dépôt, jamais de
+// collection inventée) :
+//   - likeCount       : likes reçus -> dérivé des `likes/{id}`
+//                       (l'auteur du post aimé reçoit +1/-1).
+//   - followerCount   : nombre d'abonnés -> `follows` (le suivi
+//                       reçoit +1/-1 sur followerCount).
+//   - followingCount  : nombre d'abonnements -> `follows` (le suiveur
+//                       reçoit +1/-1 sur followingCount).
+//   - commentCount    : commentaires reçus -> `comments` (l'auteur du
+//                       post commenté reçoit +1/-1).
+//   - shareCount      : partages reçus -> `shares` (l'auteur du post
+//                       partagé reçoit +1/-1).
+//
+// Note de conception : pour likeCount/followerCount/followingCount,
+// les mêmes événements maintiennent déjà `users` (Phases 3 & 4).
+// On n'a PAS créé de triggers parallèles sur les documents `users` :
+// on dérive creatorStats des MÊMES événements sources (likes/follows)
+// via des déclencheurs DÉDIÉS à la collection, sans modifier les
+// triggers existants (zéro risque de régression sur les Lots 1-5) ni
+// réintroduire un comptage indépendant incohérent — le postCount est
+// volontairement EXCLU (pas de nouvelle mécanique de comptage).
+//
+// Idempotence / robustesse : chaque mise à jour passe par une
+// TRANSACTION qui (a) crée le document avec les 5 compteurs à zéro
+// s'il n'existe pas encore (défensif — aucune pré-création client),
+// (b) borne chaque compteur à >= 0 (jamais négatif), (c) traite une
+// source manquante (post/comment absent -> auteur inconnu -> aucune
+// écriture). L'événement unique (création/suppression d'un like /
+// follow / commentaire / partage) déclenche exactement un delta.
+// ------------------------------------------------------------
+const CREATOR_STATS_FIELDS = [
+  'likeCount',
+  'followerCount',
+  'followingCount',
+  'commentCount',
+  'shareCount',
+] as const;
+
+function toCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+// Applique un delta (+1/-1) à un compteur de creatorStats/{userId},
+// de façon ATOMIQUE et IDEMPOTENTE :
+//   - crée le document à 5 compteurs (0 si absents) quand il
+//     n'existe pas encore ;
+//   - ne descend jamais sous 0 (borné).
+async function adjustCreatorStat(
+  userId: string | undefined,
+  field: (typeof CREATOR_STATS_FIELDS)[number],
+  delta: number
+): Promise<void> {
+  if (!userId) {
+    return;
+  }
+  const ref = db.doc(`creatorStats/${userId}`);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const current = snap.exists ? (snap.data() ?? {}) : {};
+    const next: Record<string, number> = {};
+    for (const f of CREATOR_STATS_FIELDS) {
+      next[f] = toCount(current[f]);
+    }
+    next[field] = Math.max(0, next[field] + delta);
+    tx.set(ref, next);
+  });
+}
+
+// Auteur d'un post donné (id). Retourne undefined si le post n'existe
+// pas (source manquante -> pas de statistique à attribuer).
+async function postAuthorId(postId: string | undefined): Promise<string | undefined> {
+  if (!postId) {
+    return undefined;
+  }
+  const postSnap = await db.doc(`posts/${postId}`).get();
+  if (!postSnap.exists) {
+    return undefined;
+  }
+  const authorId = postSnap.data()?.authorId as string | undefined;
+  return typeof authorId === 'string' && authorId.length > 0 ? authorId : undefined;
+}
+
+export const onCreatorStatsLikeCreated = onDocumentCreated(
+  'likes/{likeId}',
+  async (event) => {
+    const postId = event.data?.data()?.postId as string | undefined;
+    const authorId = await postAuthorId(postId);
+    if (!authorId) {
+      return;
+    }
+    await adjustCreatorStat(authorId, 'likeCount', 1);
+    logger.info(`creatorStats likeCount +1 for ${authorId}`);
+  }
+);
+
+export const onCreatorStatsLikeDeleted = onDocumentDeleted(
+  'likes/{likeId}',
+  async (event) => {
+    const postId = event.data?.data()?.postId as string | undefined;
+    const authorId = await postAuthorId(postId);
+    if (!authorId) {
+      return;
+    }
+    await adjustCreatorStat(authorId, 'likeCount', -1);
+    logger.info(`creatorStats likeCount -1 for ${authorId}`);
+  }
+);
+
+export const onCreatorStatsFollowCreated = onDocumentCreated(
+  'follows/{followId}',
+  async (event) => {
+    const data = event.data?.data();
+    const followerId = data?.followerId as string | undefined;
+    const followingId = data?.followingId as string | undefined;
+    if (!followerId || !followingId) {
+      return;
+    }
+    // Le suiveur gagne un abonnement, le suivi gagne un abonné.
+    await adjustCreatorStat(followerId, 'followingCount', 1);
+    await adjustCreatorStat(followingId, 'followerCount', 1);
+    logger.info(`creatorStats follow +1 for ${followerId} / ${followingId}`);
+  }
+);
+
+export const onCreatorStatsFollowDeleted = onDocumentDeleted(
+  'follows/{followId}',
+  async (event) => {
+    const data = event.data?.data();
+    const followerId = data?.followerId as string | undefined;
+    const followingId = data?.followingId as string | undefined;
+    if (!followerId || !followingId) {
+      return;
+    }
+    await adjustCreatorStat(followerId, 'followingCount', -1);
+    await adjustCreatorStat(followingId, 'followerCount', -1);
+    logger.info(`creatorStats follow -1 for ${followerId} / ${followingId}`);
+  }
+);
+
+export const onCreatorStatsCommentCreated = onDocumentCreated(
+  'comments/{commentId}',
+  async (event) => {
+    const postId = event.data?.data()?.postId as string | undefined;
+    const authorId = await postAuthorId(postId);
+    if (!authorId) {
+      return;
+    }
+    await adjustCreatorStat(authorId, 'commentCount', 1);
+    logger.info(`creatorStats commentCount +1 for ${authorId}`);
+  }
+);
+
+export const onCreatorStatsCommentDeleted = onDocumentDeleted(
+  'comments/{commentId}',
+  async (event) => {
+    const postId = event.data?.data()?.postId as string | undefined;
+    const authorId = await postAuthorId(postId);
+    if (!authorId) {
+      return;
+    }
+    await adjustCreatorStat(authorId, 'commentCount', -1);
+    logger.info(`creatorStats commentCount -1 for ${authorId}`);
+  }
+);
+
+export const onCreatorStatsShareCreated = onDocumentCreated(
+  'shares/{shareId}',
+  async (event) => {
+    const postId = event.data?.data()?.postId as string | undefined;
+    const authorId = await postAuthorId(postId);
+    if (!authorId) {
+      return;
+    }
+    await adjustCreatorStat(authorId, 'shareCount', 1);
+    logger.info(`creatorStats shareCount +1 for ${authorId}`);
+  }
+);
+
+export const onCreatorStatsShareDeleted = onDocumentDeleted(
+  'shares/{shareId}',
+  async (event) => {
+    const postId = event.data?.data()?.postId as string | undefined;
+    const authorId = await postAuthorId(postId);
+    if (!authorId) {
+      return;
+    }
+    await adjustCreatorStat(authorId, 'shareCount', -1);
+    logger.info(`creatorStats shareCount -1 for ${authorId}`);
+  }
+);
+
+// ------------------------------------------------------------
 // Santé du service
 // ------------------------------------------------------------
 

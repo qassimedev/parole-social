@@ -870,13 +870,51 @@ service cloud.firestore {
     }
 
     // ----------------------------------------------------------
+    // creatorStats/{userId} (Phase 9 — Lot 6)
+    // Statistiques d'audience PUBLIQUES d'un utilisateur, exposées
+    // sur le profil public (#/u/{userId}). Vue de PRÉSENTATION :
+    // les CINQ compteurs (likeCount, followerCount, followingCount,
+    // commentCount, shareCount) sont maintenus EXCLUSIVEMENT par les
+    // Cloud Functions (Admin SDK, contournement des règles) à partir
+    // des événements réels (likes, follows, comments, shares). Un
+    // client ne peut JAMAIS créer, modifier ni supprimer le document
+    // ni l'un de ses compteurs. Champs strictement typés (nombres
+    // entiers >= 0). Le postCount est volontairement EXCLU.
+    // ----------------------------------------------------------
+    match /creatorStats/{docId} {
+      // Lecture publique aux utilisateurs connectés (même convention
+      // que likes/shares : requête par ID de document, aucun index
+      // composite). Schéma STRICT au moment de la lecture (hasOnly +
+      // types) : seuls les CINQ compteurs bien formés (entiers >= 0)
+      // sont exposés — le postCount est exclu, aucun champ parasite
+      // n'est lisible. Tous les documents creatorStats sont écrits
+      // par les Cloud Functions (Admin SDK) avec ces 5 champs.
+      allow read: if isSignedIn()
+        && resource.data.keys().hasOnly([
+          'likeCount', 'followerCount', 'followingCount',
+          'commentCount', 'shareCount'
+        ])
+        && resource.data.likeCount is number
+        && resource.data.followerCount is number
+        && resource.data.followingCount is number
+        && resource.data.commentCount is number
+        && resource.data.shareCount is number
+        && resource.data.likeCount >= 0
+        && resource.data.followerCount >= 0
+        && resource.data.followingCount >= 0
+        && resource.data.commentCount >= 0
+        && resource.data.shareCount >= 0;
+
+      // Aucune écriture côté client : les compteurs sont des données
+      // SYSTÈME exclusivement maintenues par les Cloud Functions.
+      allow create, update, delete: if false;
+    }
+
+    // ----------------------------------------------------------
     // Collections prévues pour les phases suivantes (DENY BY DEFAULT
-    // jusqu'à implémentation) : hashtags, creatorStats.
+    // jusqu'à implémentation) : hashtags.
     // ----------------------------------------------------------
     match /hashtags/{docId} {
-      allow read, write: if false;
-    }
-    match /creatorStats/{docId} {
       allow read, write: if false;
     }
 

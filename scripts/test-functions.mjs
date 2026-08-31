@@ -1961,6 +1961,287 @@ test('AP17 reviewAppeal : idempotence et atomicité complètes', async () => {
 });
 
 // ------------------------------------------------------------
+// Statistiques d'audience publiques (Phase 9 — Lot 6) : creatorStats
+// Les CINQ compteurs (likeCount, followerCount, followingCount,
+// commentCount, shareCount) sont maintenus EXCLUSIVEMENT par les
+// déclencheurs dédiés onCreatorStats* — le postCount est volontairement
+// exclu. Chaque compteur est dérivé d'un événement RÉEL :
+//   - likeCount    <- création/suppression d'un like (l'auteur du post)
+//   - followerCount<- création/suppression d'un follow (l'utilisateur suivi)
+//   - followingCount<- création/suppression d'un follow (le suiveur)
+//   - commentCount <- création/suppression d'un commentaire (l'auteur du post)
+//   - shareCount   <- création/suppression d'un partage (l'auteur du post)
+// Le document creatorStats/{userId} est créé à la première activité
+// avec les 5 compteurs à zéro (défensif), puis alimenté par deltas
+// bornés à >= 0. Les événements sans auteur (post orphelin) n'ont
+// aucun effet (défensif).
+// ------------------------------------------------------------
+
+test('CS1 onCreatorStatsLikeCreated : auteur du post aimé → creatorStats.likeCount +1', async () => {
+  await seedProfile('csLiker', 'user');
+  await seedProfile('csAuthorL', 'user');
+  const postRef = await seedPost('csAuthorL');
+  const postId = postRef.id;
+
+  await db.collection('likes').doc(`csLiker_${postId}`).set({
+    userId: 'csLiker',
+    postId,
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+
+  const stats = await waitFor(async () => {
+    const snap = await db.doc(`creatorStats/csAuthorL`).get();
+    const d = snap.data();
+    return d && d.likeCount === 1 ? d : null;
+  });
+  if (stats.likeCount !== 1) {
+    throw new Error(`creatorStats.likeCount attendu = 1, obtenu ${stats.likeCount}`);
+  }
+});
+
+test('CS2 onCreatorStatsLikeDeleted : retrait d’un like → creatorStats.likeCount -1', async () => {
+  await seedProfile('csUnliker', 'user');
+  await seedProfile('csAuthorL2', 'user');
+  const postRef = await seedPost('csAuthorL2');
+  const postId = postRef.id;
+  const likeRef = db.collection('likes').doc(`csUnliker_${postId}`);
+
+  await likeRef.set({ userId: 'csUnliker', postId, createdAt: T.createdAt, updatedAt: T.createdAt });
+  await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csAuthorL2').get();
+    return snap.data()?.likeCount === 1;
+  });
+
+  await likeRef.delete();
+  await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csAuthorL2').get();
+    return snap.data()?.likeCount === 0;
+  });
+});
+
+test('CS3 onCreatorStatsFollowCreated : suiveur followingCount +1, suivi followerCount +1', async () => {
+  await seedProfile('csFollower', 'user');
+  await seedProfile('csFollowed', 'user');
+
+  await db.collection('follows').doc('csFollower_csFollowed').set({
+    followerId: 'csFollower',
+    followingId: 'csFollowed',
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+
+  await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csFollower').get();
+    return snap.data()?.followingCount === 1;
+  });
+  await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csFollowed').get();
+    return snap.data()?.followerCount === 1;
+  });
+});
+
+test('CS4 onCreatorStatsFollowDeleted : retrait d’un follow → followingCount/followerCount -1', async () => {
+  await seedProfile('csUnfollower', 'user');
+  await seedProfile('csFollowed2', 'user');
+  const followRef = db.collection('follows').doc('csUnfollower_csFollowed2');
+
+  await followRef.set({
+    followerId: 'csUnfollower',
+    followingId: 'csFollowed2',
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+  await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csUnfollower').get();
+    return snap.data()?.followingCount === 1;
+  });
+  await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csFollowed2').get();
+    return snap.data()?.followerCount === 1;
+  });
+
+  await followRef.delete();
+  await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csUnfollower').get();
+    return snap.data()?.followingCount === 0;
+  });
+  await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csFollowed2').get();
+    return snap.data()?.followerCount === 0;
+  });
+});
+
+test('CS5 onCreatorStatsCommentCreated : auteur du post commenté → creatorStats.commentCount +1', async () => {
+  await seedProfile('csC1', 'user');
+  await seedProfile('csAuthorC', 'user');
+  await seedPost('csAuthorC').then((postRef) => {
+    return db.collection('comments').add({
+      postId: postRef.id,
+      authorId: 'csC1',
+      content: 'Un commentaire',
+      replyToId: '',
+      createdAt: T.createdAt,
+      updatedAt: T.createdAt,
+      moderationStatus: 'visible',
+      deletedAt: null,
+    });
+  });
+
+  const stats = await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csAuthorC').get();
+    const d = snap.data();
+    return d && d.commentCount === 1 ? d : null;
+  });
+  if (stats.commentCount !== 1) {
+    throw new Error(`creatorStats.commentCount attendu = 1, obtenu ${stats.commentCount}`);
+  }
+});
+
+test('CS6 onCreatorStatsCommentDeleted : suppression d’un commentaire → creatorStats.commentCount -1', async () => {
+  await seedProfile('csC2', 'user');
+  await seedProfile('csAuthorC2', 'user');
+  const postRef = await seedPost('csAuthorC2');
+  const commentRef = await db.collection('comments').add({
+    postId: postRef.id,
+    authorId: 'csC2',
+    content: 'Un commentaire',
+    replyToId: '',
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+    moderationStatus: 'visible',
+    deletedAt: null,
+  });
+
+  await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csAuthorC2').get();
+    return snap.data()?.commentCount === 1;
+  });
+
+  await commentRef.delete();
+  await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csAuthorC2').get();
+    return snap.data()?.commentCount === 0;
+  });
+});
+
+test('CS7 onCreatorStatsShareCreated : auteur du post partagé → creatorStats.shareCount +1', async () => {
+  await seedProfile('csSharer', 'user');
+  await seedProfile('csAuthorS', 'user');
+  const postRef = await seedPost('csAuthorS');
+  const postId = postRef.id;
+
+  await db.collection('shares').doc(`csSharer_${postId}`).set({
+    userId: 'csSharer',
+    postId,
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+
+  const stats = await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csAuthorS').get();
+    const d = snap.data();
+    return d && d.shareCount === 1 ? d : null;
+  });
+  if (stats.shareCount !== 1) {
+    throw new Error(`creatorStats.shareCount attendu = 1, obtenu ${stats.shareCount}`);
+  }
+});
+
+test('CS8 onCreatorStatsShareDeleted : retrait d’un partage → creatorStats.shareCount -1', async () => {
+  await seedProfile('csUnsharer', 'user');
+  await seedProfile('csAuthorS2', 'user');
+  const postRef = await seedPost('csAuthorS2');
+  const postId = postRef.id;
+  const shareRef = db.collection('shares').doc(`csUnsharer_${postId}`);
+
+  await shareRef.set({ userId: 'csUnsharer', postId, createdAt: T.createdAt, updatedAt: T.createdAt });
+  await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csAuthorS2').get();
+    return snap.data()?.shareCount === 1;
+  });
+
+  await shareRef.delete();
+  await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csAuthorS2').get();
+    return snap.data()?.shareCount === 0;
+  });
+});
+
+test('CS9 Le document creatorStats est créé à la première activité avec les 5 compteurs (défensif, aucun postCount)', async () => {
+  await seedProfile('csFresh', 'user');
+  await seedProfile('csAuthorFR', 'user');
+  const postRef = await seedPost('csAuthorFR');
+
+  await db.collection('likes').doc(`csFresh_${postRef.id}`).set({
+    userId: 'csFresh',
+    postId: postRef.id,
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+
+  const stats = await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csAuthorFR').get();
+    if (!snap.exists) return null;
+    const d = snap.data();
+    return d.likeCount === 1 ? d : null;
+  });
+
+  const keys = Object.keys(stats).sort();
+  const expected = ['commentCount', 'followerCount', 'followingCount', 'likeCount', 'shareCount'];
+  if (JSON.stringify(keys) !== JSON.stringify(expected)) {
+    throw new Error(`Schéma creatorStats inattendu : ${keys.join(', ')}`);
+  }
+  if (stats.postCount !== undefined) {
+    throw new Error(`postCount ne doit PAS exister dans creatorStats`);
+  }
+  if (!(stats.followerCount === 0 && stats.followingCount === 0 && stats.commentCount === 0 && stats.shareCount === 0)) {
+    throw new Error(`Les compteurs non concernés doivent valoir 0, obtenu ${JSON.stringify(stats)}`);
+  }
+});
+
+test('CS10 Un like sur un post ORPHELIN (auteur manquant) → aucun creatorStats (défensif)', async () => {
+  const postRef = await seedPost('csGhostAuthor', { authorId: 'csNobody_exists_not' });
+  // post sans auteur résolvable (le doc existe mais authorId vide)
+  await db.doc(`posts/${postRef.id}`).update({ authorId: '' });
+
+  await db.collection('likes').doc(`csOrphan_${postRef.id}`).set({
+    userId: 'csOrphan',
+    postId: postRef.id,
+    createdAt: T.createdAt,
+    updatedAt: T.createdAt,
+  });
+
+  await sleep(1500);
+  const snap = await db.doc('creatorStats/csNobody_exists_not').get();
+  if (snap.exists) {
+    throw new Error('Aucun creatorStats ne devrait être créé pour un post sans auteur.');
+  }
+});
+
+test('CS11 Des événements successifs (follow puis retrait) produisent des compteurs jamais négatifs et tous numériques', async () => {
+  await seedProfile('csB1', 'user');
+  await seedProfile('csB2', 'user');
+  const followRef = db.collection('follows').doc('csB1_csB2');
+
+  await followRef.set({ followerId: 'csB1', followingId: 'csB2', createdAt: T.createdAt, updatedAt: T.createdAt });
+  await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csB1').get();
+    return snap.data()?.followingCount === 1;
+  });
+  await followRef.delete();
+  const final = await waitFor(async () => {
+    const snap = await db.doc('creatorStats/csB1').get();
+    const d = snap.data();
+    return d && d.followingCount === 0 ? d : null;
+  });
+  const values = [final.likeCount, final.followerCount, final.followingCount, final.commentCount, final.shareCount];
+  if (values.some((v) => typeof v !== 'number' || v < 0)) {
+    throw new Error(`Un compteur est négatif ou non numérique : ${JSON.stringify(final)}`);
+  }
+});
+
+// ------------------------------------------------------------
 // Exécution
 // ------------------------------------------------------------
 let passed = 0;

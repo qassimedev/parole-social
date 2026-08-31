@@ -955,6 +955,35 @@ code {
   margin-bottom: 0.75rem;
 }
 
+/* Statistiques d'audience publiques (Phase 9 — Lot 6) */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--color-muted);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.stat__value {
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+.stat__label {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+
 .public-info {
   margin-top: 0.75rem;
 }

@@ -371,6 +371,19 @@ async function seed() {
     await setDoc(doc(db, 'comments', 'cQRemoved'), comment('post1', 'dave', 'Commentaire retiré', 'removed'));
     await setDoc(doc(db, 'users', 'warnedQ'), user('warnedQ', 'user', { moderationStatus: 'warned' }));
     await setDoc(doc(db, 'users', 'bannedQ'), user('bannedQ', 'user', { banned: true, moderationStatus: 'suspended' }));
+
+    // Statistiques d'audience publiques (Phase 9 - Lot 6) :
+    // documents SCHÉMA STRICT écrits par les Cloud Functions avec les
+    // 5 compteurs (le postCount est EXCLU). creatorStats/alice servira
+    // aux lectures valides ; les documents mal formés sont créés par la
+    // règle en dur sur les seuls tests qui doivent vérifier le rejet.
+    await setDoc(doc(db, 'creatorStats', 'alice'), {
+      likeCount: 3,
+      followerCount: 2,
+      followingCount: 1,
+      commentCount: 4,
+      shareCount: 5,
+    });
   });
 }
 
@@ -1958,6 +1971,88 @@ test('R19 Recherche users par un utilisateur non authentifié REFUS', async () =
     where('searchTokens', 'array-contains', 'alice')
   )));
 });
+
+// ============================================================
+// S. Statistiques d'audience publiques (Phase 9 — Lot 6) : creatorStats
+// Collection `creatorStats/{userId}` — lecture PUBLIQUE (utilisateurs
+// connectés) avec schéma STRICT (hasOnly + types), AUCUNE écriture côté
+// client (les compteurs sont maintenus exclusivement par les Cloud
+// Functions). Le postCount est exclu. Un document absent = aucun accès
+// (lecture refusée pour un doc inexistant), un document mal formé
+// (champ parasite / non numérique / postCount) est illisible.
+// ============================================================
+function creatorStatsDoc(overrides = {}) {
+  return {
+    likeCount: 3,
+    followerCount: 2,
+    followingCount: 1,
+    commentCount: 4,
+    shareCount: 5,
+    ...overrides,
+  };
+}
+
+test('S1  Non-auth : lecture de creatorStats REFUS', async () => {
+  await expectDenied(getDoc(doc(anon().firestore(), 'creatorStats', 'alice')));
+});
+test('S2  Un utilisateur connecté lit creatorStats OK (schéma strict complet)', async () => {
+  await expectAllowed(getDoc(doc(eve().firestore(), 'creatorStats', 'alice')));
+});
+test('S3  Un autre connecté lit creatorStats OK (lecture publique)', async () => {
+  await expectAllowed(getDoc(doc(bob().firestore(), 'creatorStats', 'alice')));
+});
+test('S4  Lecture d’un creatorStats absent REFUS (document inexistant)', async () => {
+  await expectDenied(getDoc(doc(eve().firestore(), 'creatorStats', 'ghost')));
+});
+test('S5  Un document avec un champ parasite (postCount) est ILLISIBLE REFUS', async () => {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'creatorStats', 'extra'),
+      creatorStatsDoc({ postCount: 7 }));
+  });
+  await expectDenied(getDoc(doc(eve().firestore(), 'creatorStats', 'extra')));
+});
+test('S6  Un compteur non numérique rend le document ILLISIBLE REFUS', async () => {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'creatorStats', 'badnum'),
+      creatorStatsDoc({ likeCount: 'trois' }));
+  });
+  await expectDenied(getDoc(doc(eve().firestore(), 'creatorStats', 'badnum')));
+});
+test('S7  Un champ manquant rend le document ILLISIBLE REFUS (schéma strict)', async () => {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'creatorStats', 'missing'), { likeCount: 3 });
+  });
+  await expectDenied(getDoc(doc(eve().firestore(), 'creatorStats', 'missing')));
+});
+test('S8  Un client (utilisateur normal) ne peut PAS créer creatorStats REFUS', async () => {
+  await expectDenied(setDoc(doc(eve().firestore(), 'creatorStats', 'eve'), creatorStatsDoc()));
+});
+test('S9  Un client ne peut PAS modifier creatorStats REFUS', async () => {
+  await expectDenied(updateDoc(doc(eve().firestore(), 'creatorStats', 'alice'), { likeCount: 999 }));
+  await expectDenied(updateDoc(doc(eve().firestore(), 'creatorStats', 'alice'), { likeCount: 50, followerCount: 2, followingCount: 1, commentCount: 4, shareCount: 5 }));
+});
+test('S10 Un client ne peut PAS supprimer creatorStats REFUS', async () => {
+  await expectDenied(deleteDoc(doc(eve().firestore(), 'creatorStats', 'alice')));
+});
+test('S11 Un modérateur ne peut PAS écrire creatorStats REFUS (serveur uniquement)', async () => {
+  await expectDenied(setDoc(doc(mod().firestore(), 'creatorStats', 'mod'), creatorStatsDoc()));
+  await expectDenied(updateDoc(doc(mod().firestore(), 'creatorStats', 'alice'), { likeCount: 999 }));
+  await expectDenied(deleteDoc(doc(mod().firestore(), 'creatorStats', 'alice')));
+});
+test('S12 Un admin ne peut PAS écrire creatorStats REFUS (serveur uniquement)', async () => {
+  await expectDenied(setDoc(doc(admin().firestore(), 'creatorStats', 'admin'), creatorStatsDoc()));
+  await expectDenied(updateDoc(doc(admin().firestore(), 'creatorStats', 'alice'), { likeCount: 999 }));
+  await expectDenied(deleteDoc(doc(admin().firestore(), 'creatorStats', 'alice')));
+});
+test('S13 Un document creatorStats NEGATIF est illisible REFUS', async () => {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'creatorStats', 'neg'), creatorStatsDoc({ likeCount: -4 }));
+  });
+  // Un compteur négatif violerait le contrat (compteurs bornés à >= 0) :
+  // le document n'est pas exposé en lecture.
+  await expectDenied(getDoc(doc(eve().firestore(), 'creatorStats', 'neg')));
+});
+
 
 // ============================================================
 // Exécution
